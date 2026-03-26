@@ -1,4 +1,4 @@
-name: Build ReSukiSU for Nubia X NX616J (Clang 19.0.1 Native)
+name: Build ReSukiSU for Nubia X NX616J (Fixed vDSO Linker)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install build dependencies (Clang 19 + arm32)
+      - name: Install build dependencies (Clang 19 + full toolchain)
         run: |
           sudo apt update
           sudo apt install -y \
@@ -16,9 +16,8 @@ jobs:
             bc bison flex libssl-dev libelf-dev \
             gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-          # 让系统默认使用 clang-19
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
-          sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-19 100
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-19 100
 
       - name: Clone ReSukiSU
         uses: actions/checkout@v4
@@ -38,7 +37,7 @@ jobs:
           cd android_kernel_nubia_sdm845
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
 
-      - name: Compile kernel (Clang 19.0.1 + fix stack protector)
+      - name: Compile kernel (fixed vDSO linker)
         run: |
           cd android_kernel_nubia_sdm845
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -46,12 +45,10 @@ jobs:
           export CC=clang
           export LLVM=1
           export LD=ld.lld
-          # 加载设备原生配置
+          export LD32=arm-linux-gnueabihf-ld
           make ARCH=arm64 vendor/nubia/sdm845_defconfig
-          # 修复 Clang 19 不支持的栈保护选项
           scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           scripts/config --enable CONFIG_CC_STACKPROTECTOR_REGULAR
-          # 开始编译（匹配设备原生优化）
           make ARCH=arm64 -j4 Image.lz4
 
       - name: Pack into AnyKernel3
@@ -62,6 +59,12 @@ jobs:
           cd AnyKernel3
           cp ../ReSukiSU/out/Image.lz4 .
           zip -r ../ReSukiSU-NX616J-Final.zip *
+
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReSukiSU-NX616J-Final
+          path: ReSukiSU-NX616J-Final.zip
 
       - name: Upload final package
         uses: actions/upload-artifact@v4
