@@ -28,10 +28,11 @@ jobs:
           ref: lineage-22.2
           path: android_kernel_nubia_sdm845
 
-      - name: Patch kernel & build ReSukiSU
+      - name: Patch kernel & build ReSukiSU (fixed path)
         run: |
           cd ReSukiSU
-          bash build.sh \
+          # 使用 ReSukiSU 官方 setup.sh 一键完成补丁和编译
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs-dev \
             --kernel ../android_kernel_nubia_sdm845 \
             --arch arm64 \
             --defconfig nubia_sdm845_defconfig \
