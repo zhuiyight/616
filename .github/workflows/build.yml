@@ -1,4 +1,4 @@
-name: Build ReSukiSU for Nubia X NX616J (Simplified Clang 19)
+name: Build ReSukiSU for Nubia X NX616J (No Compat vDSO)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install build dependencies (Clang 19 + arm32, no broken ld.lld)
+      - name: Install build dependencies (Clang 19 + arm32)
         run: |
           sudo apt update
           sudo apt install -y \
@@ -16,7 +16,6 @@ jobs:
             bc bison flex libssl-dev libelf-dev \
             gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-          # 只配置 clang-19，移除不存在的 ld.lld-19
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
 
       - name: Clone ReSukiSU
@@ -37,18 +36,21 @@ jobs:
           cd android_kernel_nubia_sdm845
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
 
-      - name: Compile kernel (fixed vDSO linker + stack protector)
+      - name: Compile kernel (disable compat vDSO)
         run: |
           cd android_kernel_nubia_sdm845
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
           export CC=clang
           export LLVM=1
           export LD=ld.lld
-          export LD32=arm-linux-gnueabihf-ld
+          # 加载配置
           make ARCH=arm64 vendor/nubia/sdm845_defconfig
+          # 核心修复：彻底禁用 32 位 compat vDSO，跳过链接失败
+          scripts/config --disable CONFIG_COMPAT_VDSO
+          # 修复栈保护选项
           scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
           scripts/config --enable CONFIG_CC_STACKPROTECTOR_REGULAR
+          # 开始编译（不再需要 CROSS_COMPILE_ARM32）
           make ARCH=arm64 -j4 Image.lz4
 
       - name: Pack into AnyKernel3
