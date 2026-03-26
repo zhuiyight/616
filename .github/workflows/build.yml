@@ -1,73 +1,92 @@
-name: Build ReSukiSU for Nubia X NX616J (Fixed Bluetooth Header)
+name: Build ReSukiSU for Nubia X NX616J (Config Merged)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build ReSukiSU by ${{ github.actor }}
     runs-on: ubuntu-latest
     steps:
-      - name: Install build dependencies (Clang 19 + arm32)
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            git build-essential llvm lld clang-19 \
-            python3 python3-pip zip \
-            bc bison flex libssl-dev libelf-dev \
-            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
+    - uses: actions/checkout@v4
 
-      - name: Clone ReSukiSU
-        uses: actions/checkout@v4
-        with:
-          repository: ReSukiSU/ReSukiSU
-          path: ReSukiSU
+    - name: Setup All Configuration
+      run: |
+        # 设备核心配置（已合并原 config.env）
+        echo "KERNEL_SOURCE=https://github.com/LineageOS/android_kernel_nubia_sdm845" >> $GITHUB_ENV
+        echo "KERNEL_SOURCE_BRANCH=lineage-22.2" >> $GITHUB_ENV
+        echo "KERNEL_DEFCONFIG=vendor/nubia/sdm845_defconfig" >> $GITHUB_ENV
+        echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
+        echo "KERNEL_FILE=Image.lz4" >> $GITHUB_ENV
+        echo "CLANG_VERSION=19.0.1" >> $GITHUB_ENV
+        echo "BUILD_EXTRA_COMMAND=" >> $GITHUB_ENV
+        echo "USE_KERNELSU=false" >> $GITHUB_ENV
+        echo "MAKE_BOOT_IMAGE=false" >> $GITHUB_ENV
+        echo "BOOT_SIGNATURE=false" >> $GITHUB_ENV
+        echo "SOURCE_BOOT_IMAGE=" >> $GITHUB_ENV
+        # 构建信息
+        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "DEVICE=NX616J" >> $GITHUB_ENV
+        echo "UPLOADNAME=-ReSukiSU" >> $GITHUB_ENV
 
-      - name: Clone Nubia SDM845 kernel (Lineage-22.2)
-        uses: actions/checkout@v4
-        with:
-          repository: LineageOS/android_kernel_nubia_sdm845
-          ref: lineage-22.2
-          path: android_kernel_nubia_sdm845
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y git build-essential llvm lld clang-19 \
+          bc bison flex libssl-dev libelf-dev python3 python3-pip zip \
+          gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+          gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-      - name: Patch kernel with ReSukiSU
-        run: |
-          cd android_kernel_nubia_sdm845
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
+    - name: Clone kernel source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth=1
 
-      - name: Fix bluetooth header include format
-        run: |
-          cd android_kernel_nubia_sdm845
-          # 修复 btfm_slim.c 头文件包含
-          sed -i 's/#include <btfm_slim_wcn3990.h>/#include "btfm_slim_wcn3990.h"/' drivers/bluetooth/btfm_slim.c
-          # 修复 btfm_slim_wcn3990.h 头文件包含
-          sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim_wcn3990.h
+    - name: Apply ReSukiSU patch
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
 
-      - name: Compile kernel (disable compat vDSO + fix headers)
-        run: |
-          cd android_kernel_nubia_sdm845
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CC=clang
-          export LLVM=1
-          export LD=ld.lld
-          make ARCH=arm64 vendor/nubia/sdm845_defconfig
-          scripts/config --disable CONFIG_COMPAT_VDSO
-          scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
-          scripts/config --enable CONFIG_CC_STACKPROTECTOR_REGULAR
-          make ARCH=arm64 -j4 Image.lz4
+    - name: Fix bluetooth header include errors
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        sed -i 's/#include <btfm_slim_wcn3990.h>/#include "btfm_slim_wcn3990.h"/' drivers/bluetooth/btfm_slim.c
+        sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim_wcn3990.h
 
-      - name: Pack into AnyKernel3
-        run: |
-          mkdir -p ReSukiSU/out
-          cp android_kernel_nubia_sdm845/arch/arm64/boot/Image.lz4 ReSukiSU/out/
-          git clone https://github.com/osm0sis/AnyKernel3.git
-          cd AnyKernel3
-          cp ../ReSukiSU/out/Image.lz4 .
-          zip -r ../ReSukiSU-NX616J-Final.zip *
+    - name: Configure and build kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=clang
+        export LLVM=1
+        export LD=ld.lld
+        # 加载设备默认配置
+        make ${{ env.KERNEL_DEFCONFIG }}
+        # 修复编译错误（vDSO + stack protector）
+        scripts/config --disable CONFIG_COMPAT_VDSO
+        scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
+        scripts/config --enable CONFIG_CC_STACKPROTECTOR_REGULAR
+        # 开始编译
+        make -j$(nproc) ARCH=arm64 Image.lz4
 
-      - name: Upload final package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ReSukiSU-NX616J-Final
-          path: ReSukiSU-NX616J-Final.zip
+    - name: Pack with AnyKernel3
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone https://github.com/osm0sis/AnyKernel3.git --depth=1
+        cd AnyKernel3
+        cp ../android-kernel/arch/arm64/boot/Image.lz4 .
+        # 匹配 Nubia X 设备
+        sed -i 's/device.name1=.*/device.name1=NX616J/' anykernel.sh
+        sed -i 's/device.name2=.*/device.name2=nx616j/' anykernel.sh
+        sed -i 's/device.name3=.*/device.name3=Nubia X/' anykernel.sh
+        zip -r ../ReSukiSU-${{ env.DEVICE }}-${{ env.BUILD_TIME }}.zip *
+
+    - name: Upload final package
+      uses: actions/upload-artifact@v4
+      with:
+        name: ReSukiSU-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+        path: $GITHUB_WORKSPACE/ReSukiSU-*.zip
+        
