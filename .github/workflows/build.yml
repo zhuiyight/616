@@ -1,4 +1,4 @@
-name: Build ReSukiSU for Nubia X NX616J (Fixed vDSO Linker)
+name: Build ReSukiSU for Nubia X NX616J (Simplified Clang 19)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install build dependencies (Clang 19 + full toolchain)
+      - name: Install build dependencies (Clang 19 + arm32, no broken ld.lld)
         run: |
           sudo apt update
           sudo apt install -y \
@@ -16,8 +16,8 @@ jobs:
             bc bison flex libssl-dev libelf-dev \
             gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          # 只配置 clang-19，移除不存在的 ld.lld-19
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
-          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-19 100
 
       - name: Clone ReSukiSU
         uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
           cd android_kernel_nubia_sdm845
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
 
-      - name: Compile kernel (fixed vDSO linker)
+      - name: Compile kernel (fixed vDSO linker + stack protector)
         run: |
           cd android_kernel_nubia_sdm845
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -59,12 +59,6 @@ jobs:
           cd AnyKernel3
           cp ../ReSukiSU/out/Image.lz4 .
           zip -r ../ReSukiSU-NX616J-Final.zip *
-
-      - name: Upload final package
-        uses: actions/upload-artifact@v4
-        with:
-          name: ReSukiSU-NX616J-Final
-          path: ReSukiSU-NX616J-Final.zip
 
       - name: Upload final package
         uses: actions/upload-artifact@v4
