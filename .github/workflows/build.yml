@@ -28,15 +28,21 @@ jobs:
           ref: lineage-22.2
           path: android_kernel_nubia_sdm845
 
-      - name: Patch kernel & build ReSukiSU (fixed path)
+      - name: Verify kernel directory structure
         run: |
-          cd ReSukiSU
-          # 使用 ReSukiSU 官方 setup.sh 一键完成补丁和编译
+          cd android_kernel_nubia_sdm845
+          ls -la | grep drivers
+          echo "Kernel directory structure verified."
+
+      - name: Patch kernel & build ReSukiSU
+        run: |
+          cd android_kernel_nubia_sdm845
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs-dev \
-            --kernel ../android_kernel_nubia_sdm845 \
+            --kernel . \
             --arch arm64 \
             --defconfig nubia_sdm845_defconfig \
-            --image Image.lz4
+            --image Image.lz4 \
+            --out ../ReSukiSU/out
 
       - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
