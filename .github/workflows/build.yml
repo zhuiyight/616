@@ -1,4 +1,4 @@
-name: Build ReSukiSU for Nubia X NX616J (Full Compile)
+name: Build ReSukiSU for Nubia X NX616J (Final)
 
 on:
   workflow_dispatch:
@@ -33,31 +33,28 @@ jobs:
           cd android_kernel_nubia_sdm845
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
 
-      - name: Compile kernel (full build)
+      - name: Compile kernel (correct defconfig)
         run: |
           cd android_kernel_nubia_sdm845
-          # 加载交叉编译工具链
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang
           export LLVM=1
-          # 生成配置
-          make ARCH=arm64 nubia_sdm845_defconfig
-          # 开始编译（耗时约30-60分钟）
+          # 使用你提供的 vendor 路径 defconfig
+          make ARCH=arm64 vendor/nubia/sdm845_defconfig
           make ARCH=arm64 -j$(nproc) Image.lz4
 
       - name: Pack into AnyKernel3
         run: |
-          cd ReSukiSU
-          mkdir -p out
-          cp ../android_kernel_nubia_sdm845/arch/arm64/boot/Image.lz4 out/
-          # 下载 AnyKernel3 模板并打包
+          mkdir -p ReSukiSU/out
+          cp android_kernel_nubia_sdm845/arch/arm64/boot/Image.lz4 ReSukiSU/out/
           git clone https://github.com/osm0sis/AnyKernel3.git
           cd AnyKernel3
-          cp ../out/Image.lz4 .
-          zip -r ../ReSukiSU-NX616J.zip *
+          cp ../ReSukiSU/out/Image.lz4 .
+          # 生成最终刷机包
+          zip -r ../ReSukiSU-NX616J-Final.zip *
 
       - name: Upload final package
         uses: actions/upload-artifact@v4
         with:
-          name: ReSukiSU-NX616J-Full
-          path: ReSukiSU/ReSukiSU-NX616J.zip
+          name: ReSukiSU-NX616J-Final
+          path: ReSukiSU-NX616J-Final.zip
