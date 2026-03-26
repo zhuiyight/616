@@ -1,0 +1,44 @@
+name: Build ReSukiSU for Nubia X NX616J
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git build-essential llvm lld clang \
+            python3 python3-pip zip \
+            bc bison flex libssl-dev libelf-dev
+
+      - name: Clone ReSukiSU
+        uses: actions/checkout@v4
+        with:
+          repository: ReSukiSU/ReSukiSU
+          path: ReSukiSU
+
+      - name: Clone Nubia SDM845 kernel (Lineage-22.2)
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_nubia_sdm845
+          ref: lineage-22.2
+          path: android_kernel_nubia_sdm845
+
+      - name: Patch kernel & build ReSukiSU
+        run: |
+          cd ReSukiSU
+          bash build.sh \
+            --kernel ../android_kernel_nubia_sdm845 \
+            --arch arm64 \
+            --defconfig nubia_sdm845_defconfig \
+            --image Image.lz4
+
+      - name: Upload AnyKernel3 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReSukiSU-NX616J
+          path: ReSukiSU/out/*.zip
