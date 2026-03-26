@@ -49,11 +49,15 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
 
-    - name: Fix bluetooth header include errors
+    - name: Fix all header include errors
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        # 修复蓝牙模块头文件错误（之前报错 + 本次新增）
         sed -i 's/#include <btfm_slim_wcn3990.h>/#include "btfm_slim_wcn3990.h"/' drivers/bluetooth/btfm_slim.c
         sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim_wcn3990.h
+        sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim.c
+        # 修复 fuse 模块头文件错误（本次新增）
+        sed -i 's/#include <../mount.h>/#include "../mount.h"/' fs/fuse/file_observer.c
 
     - name: Configure and build kernel
       run: |
@@ -89,4 +93,3 @@ jobs:
       with:
         name: ReSukiSU-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
         path: $GITHUB_WORKSPACE/ReSukiSU-*.zip
-        
