@@ -1,51 +1,71 @@
-name: Build NX616J Kernel
+name: Build Kernel
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]  # 触发构建的分支，根据需要修改
   pull_request:
-  workflow_dispatch:
-
-env:
-  KERNEL_DIR: .
-  DEFCONFIG: vendor/nubia_sdm845_defconfig
-  ARCH: arm64
-  CLANG_VERSION: clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04  # 与下载的文件名一致
+    branches: [ main ]
+  workflow_dispatch:    # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
+      - name: Set up job
+        run: echo "Starting build process..."
+
       - name: Checkout kernel source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
-          submodules: recursive
+          submodules: recursive  # 如果内核包含子模块，请保留此行
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y bc bison build-essential curl flex gcc g++ git libssl-dev libtool make ninja-build python3 python3-pip wget zip zlib1g-dev
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git gnupg gperf libssl-dev libtool libssl-dev make zip liblz4-tool libzstd-dev
 
       - name: Download LLVM 19.0.1 Toolchain
         run: |
+          # 修正后的直接下载链接
           wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-19.0.1/clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          
+          # 创建工具链目录并解压（使用 --strip-components=1 确保解压后不带顶层文件夹）
           mkdir -p prebuilts/clang/host/linux-x86/clang
           tar -xJf clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz -C prebuilts/clang/host/linux-x86/clang --strip-components=1
+          
+          # 验证安装
           prebuilts/clang/host/linux-x86/clang/bin/clang --version
 
       - name: Configure kernel
         run: |
-          cd ${{ env.KERNEL_DIR }}
-          make O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- ${{ env.DEFCONFIG }}
+          # 定义环境变量，指向正确的工具链路径
+          export ARCH=arm64
+          export CLANG_VERSION=clang
+          export CLANG_PATH=${GITHUB_WORKSPACE}/prebuilts/clang/host/linux-x86/clang/bin
+          export DEFCONFIG=lineageos_rubens-userdebug_defconfig  # 请根据你的内核替换 defconfig 名称
+          
+          # 配置内核
+          make O=out ${DEFCONFIG}
 
       - name: Build kernel
         run: |
-          cd ${{ env.KERNEL_DIR }}
-          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          # 继续使用环境变量
+          export ARCH=arm64
+          export CLANG_VERSION=clang
+          export CLANG_PATH=${GITHUB_WORKSPACE}/prebuilts/clang/host/linux-x86/clang/bin
+          
+          # 开始编译（使用 2 核心，可根据 GitHub Actions 的配置调整 -j 参数）
+          make O=out -j2 CC=clang
 
       - name: Upload kernel image
-        uses: actions/upload-artifact@v4  # 升级到 v4 避免弃用错误
+        if: success()
+        uses: actions/upload-artifact@v3
         with:
           name: kernel-image
-          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          path: out/arch/arm64/boot/Image  # 请根据你的内核输出路径调整
+
+      - name: Post Checkout kernel source
+        run: echo "Build completed."
+
+      - name: Complete job
+        run: echo "Job finished."
