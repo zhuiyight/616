@@ -1,71 +1,93 @@
-name: Build Kernel
+name: Build LineageOS Kernel
 
 on:
-  push:
-    branches: [ main ]  # 触发构建的分支，根据需要修改
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:    # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Clean build (remove out/ before start)'
+        required: true
+        default: true
+        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Set up job
-        run: echo "Starting build process..."
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        repository: LineageOS/android_kernel_nubia_sdm845
+        ref: lineage-22.2
+        path: kernel
 
-      - name: Checkout kernel source
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive  # 如果内核包含子模块，请保留此行
+    - name: Set up build environment
+      run: |
+        sudo apt update
+        sudo apt install -y bc bison build-essential curl flex git gnupg gperf liblz4-tool \
+          libncurses5-dev libssl-dev lzop pngcrush rsync schedtool squashfs-tools xsltproc \
+          zip zlib1g-dev libxml2 libxml2-utils openjdk-11-jdk python3 python-is-python3
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex g++-multilib gcc-multilib git gnupg gperf libssl-dev libtool libssl-dev make zip liblz4-tool libzstd-dev
+    - name: Install Clang 19 toolchain
+      run: |
+        mkdir -p ${{ github.workspace }}/toolchain
+        cd ${{ github.workspace }}/toolchain
+        # 使用 Google 官方 Clang 19 预编译包 (r536225)
+        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r29/clang-r536225.tar.gz
+        tar -xzf clang-r536225.tar.gz
+        # 安装 binutils 等依赖
+        wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-14.0.0_r29.tar.gz
+        mkdir -p gcc
+        tar -xzf aarch64-linux-android-4.9.tar.gz -C gcc
 
-      - name: Download LLVM 19.0.1 Toolchain
-        run: |
-          # 修正后的直接下载链接
-          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-19.0.1/clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          
-          # 创建工具链目录并解压（使用 --strip-components=1 确保解压后不带顶层文件夹）
-          mkdir -p prebuilts/clang/host/linux-x86/clang
-          tar -xJf clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz -C prebuilts/clang/host/linux-x86/clang --strip-components=1
-          
-          # 验证安装
-          prebuilts/clang/host/linux-x86/clang/bin/clang --version
+    - name: Merge kernel configs
+      working-directory: kernel
+      run: |
+        # 复制基础 defconfig
+        cp arch/arm64/configs/vendor/nubia/sdm845_defconfig .config
+        # 使用 merge_config.sh 合并设备专用配置
+        scripts/kconfig/merge_config.sh -m -O . .config arch/arm64/configs/vendor/nubia/nx616j.config
+        # 生成最终配置
+        make ARCH=arm64 olddefconfig
 
-      - name: Configure kernel
-        run: |
-          # 定义环境变量，指向正确的工具链路径
-          export ARCH=arm64
-          export CLANG_VERSION=clang
-          export CLANG_PATH=${GITHUB_WORKSPACE}/prebuilts/clang/host/linux-x86/clang/bin
-          export DEFCONFIG=lineageos_rubens-userdebug_defconfig  # 请根据你的内核替换 defconfig 名称
-          
-          # 配置内核
-          make O=out ${DEFCONFIG}
+    - name: Build kernel
+      working-directory: kernel
+      env:
+        PATH: ${{ github.workspace }}/toolchain/clang-r536225/bin:${{ github.workspace }}/toolchain/gcc/bin:$PATH
+      run: |
+        # 设置编译环境变量
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+        export LD_LIBRARY_PATH=${{ github.workspace }}/toolchain/clang-r536225/lib:$LD_LIBRARY_PATH
 
-      - name: Build kernel
-        run: |
-          # 继续使用环境变量
-          export ARCH=arm64
-          export CLANG_VERSION=clang
-          export CLANG_PATH=${GITHUB_WORKSPACE}/prebuilts/clang/host/linux-x86/clang/bin
-          
-          # 开始编译（使用 2 核心，可根据 GitHub Actions 的配置调整 -j 参数）
-          make O=out -j2 CC=clang
+        # 开始编译
+        make -j$(nproc) ARCH=arm64 \
+          CC=clang \
+          LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          READELF=llvm-readelf \
+          STRIP=llvm-strip \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          Image.gz-dtb modules
 
-      - name: Upload kernel image
-        if: success()
-        uses: actions/upload-artifact@v3
-        with:
-          name: kernel-image
-          path: out/arch/arm64/boot/Image  # 请根据你的内核输出路径调整
+    - name: Package kernel artifacts
+      run: |
+        mkdir -p kernel_artifacts
+        # 复制内核镜像
+        cp kernel/arch/arm64/boot/Image.gz-dtb kernel_artifacts/
+        # 安装模块到临时目录并打包
+        mkdir -p kernel_modules
+        make -C kernel ARCH=arm64 \
+          INSTALL_MOD_PATH=${{ github.workspace }}/kernel_modules \
+          modules_install
+        cd kernel_modules && tar czf ../kernel_artifacts/modules.tar.gz . && cd ..
 
-      - name: Post Checkout kernel source
-        run: echo "Build completed."
-
-      - name: Complete job
-        run: echo "Job finished."
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: lineage-kernel
+        path: kernel_artifacts/
