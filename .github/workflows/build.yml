@@ -1,125 +1,66 @@
-name: Build LineageOS Kernel
+name: Build SDM845 Kernel with ReSukiSU
 
 on:
   workflow_dispatch:
-    inputs:
-      clean_build:
-        description: 'Clean build (remove out/ before start)'
-        required: true
-        default: true
-        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-    - name: Checkout kernel source
-      uses: actions/checkout@v4
-      with:
-        repository: LineageOS/android_kernel_nubia_sdm845
-        ref: lineage-22.2
-        path: kernel
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git wget curl make flex bison \
+            libncurses5-dev libssl-dev python3 libelf-dev bc cpio \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            clang-14 lld-14 llvm-14 dwarves ccache
+          # 设置默认 clang/ld.lld 版本
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-14 100
 
-    - name: Set up build environment
-      run: |
-        sudo apt update
-        sudo apt install -y bc bison build-essential curl flex git gnupg gperf liblz4-tool \
-          libncurses5-dev libssl-dev lzop pngcrush rsync schedtool squashfs-tools xsltproc \
-          zip zlib1g-dev libxml2 libxml2-utils openjdk-11-jdk python3 python-is-python3
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 https://github.com/LineageOS/android_kernel_nubia_sdm845.git -b lineage-22.2 kernel
 
-    # 缓存工具链
-    - name: Cache toolchains
-      id: cache-toolchains
-      uses: actions/cache@v4
-      with:
-        path: toolchain
-        key: toolchain-${{ runner.os }}-clang-r536225
+      - name: Apply ReSukiSU
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-    - name: Get Clang 19 (r536225) from AOSP
-      if: steps.cache-toolchains.outputs.cache-hit != 'true'
-      run: |
-        # 克隆 AOSP Clang 仓库的 master 分支（浅克隆）
-        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchain/clang
-        cd toolchain/clang
-        # 查找包含 r536225 的标签或提交
-        # 方法：切换到 android-14.0.0_r29 标签（如果存在）
-        if git rev-parse --verify refs/tags/android-14.0.0_r29 >/dev/null 2>&1; then
-          git checkout tags/android-14.0.0_r29
-        else
-          # 如果标签不存在，则使用包含 r536225 的具体提交（从历史记录中查找）
-          # 这里使用已知包含 clang-r536225 的提交（可通过 git log 查找）
-          git checkout 2c2e5e2d0e5f1a3b4c5d6e7f8a9b0c1d2e3f4a5b || true
-        fi
+      - name: Merge device-specific configs
+        run: |
+          cd kernel
+          # 合并基础 SoC 配置和机型配置
+          scripts/kconfig/merge_config.sh -m arch/arm64/configs/vendor/nubia/sdm845_defconfig \
+                                           arch/arm64/configs/vendor/nubia/nx616j.config
+          mv .config arch/arm64/configs/merged_defconfig
 
-    # 尝试获取 GCC（可选，如果不成功则跳过）
-    - name: Get GCC cross-compiler (optional)
-      if: steps.cache-toolchains.outputs.cache-hit != 'true'
-      continue-on-error: true
-      run: |
-        mkdir -p toolchain/gcc
-        cd toolchain/gcc
-        # 尝试多个可能的标签
-        for tag in android-14.0.0_r1 android-13.0.0_r1 android-12.1.0_r1 master; do
-          git clone --depth=1 -b $tag https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 . && break || true
-        done
-        cd -
+      - name: Configure kernel
+        run: |
+          cd kernel
+          export ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
+          # 使用合并后的配置
+          make merged_defconfig
+          # 关闭 BTF 以加快编译（可选）
+          scripts/config --disable DEBUG_INFO_BTF
+          make olddefconfig
 
-    - name: Verify toolchain versions
-      run: |
-        echo "Clang version:"
-        toolchain/clang/bin/clang --version | head -n1
-        if [ -f toolchain/gcc/bin/aarch64-linux-android-gcc ]; then
-          echo "GCC version:"
-          toolchain/gcc/bin/aarch64-linux-android-gcc --version | head -n1
-        else
-          echo "GCC not found, continuing without it"
-        fi
+      - name: Build kernel
+        run: |
+          cd kernel
+          export ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
+          # 编译内核映像和设备树
+          make -j$(nproc) Image.gz dtbs
 
-    - name: Merge kernel configs
-      working-directory: kernel
-      run: |
-        if [ "${{ github.event.inputs.clean_build }}" == "true" ]; then
-          rm -rf out
-        fi
-        cp arch/arm64/configs/vendor/nubia/sdm845_defconfig .config
-        scripts/kconfig/merge_config.sh -m -O . .config arch/arm64/configs/vendor/nubia/nx616j.config
-        make ARCH=arm64 olddefconfig
+      - name: Prepare artifacts
+        run: |
+          cd kernel
+          mkdir -p out
+          cp arch/arm64/boot/Image.gz out/
+          cp arch/arm64/boot/dts/qcom/*.dtb out/ 2>/dev/null || true
 
-    - name: Build kernel
-      working-directory: kernel
-      env:
-        PATH: ${{ github.workspace }}/toolchain/clang/bin:${{ github.workspace }}/toolchain/gcc/bin:$PATH
-        LD_LIBRARY_PATH: ${{ github.workspace }}/toolchain/clang/lib:$LD_LIBRARY_PATH
-      run: |
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export CROSS_COMPILE=aarch64-linux-android-
-        export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-
-        make -j$(nproc) ARCH=arm64 \
-          CC=clang \
-          LD=ld.lld \
-          AR=llvm-ar \
-          NM=llvm-nm \
-          OBJCOPY=llvm-objcopy \
-          OBJDUMP=llvm-objdump \
-          READELF=llvm-readelf \
-          STRIP=llvm-strip \
-          LLVM=1 \
-          LLVM_IAS=1 \
-          Image.gz-dtb modules
-
-    - name: Package kernel artifacts
-      run: |
-        mkdir -p kernel_artifacts
-        cp kernel/arch/arm64/boot/Image.gz-dtb kernel_artifacts/
-        mkdir -p kernel_modules
-        make -C kernel ARCH=arm64 \
-          INSTALL_MOD_PATH=${{ github.workspace }}/kernel_modules \
-          modules_install
-        cd kernel_modules && tar czf ../kernel_artifacts/modules.tar.gz . && cd ..
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: lineage-kernel
-        path: kernel_artifacts/
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdm845-kernel-with-sukisu
+          path: kernel/out/
