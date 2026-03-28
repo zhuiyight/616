@@ -7,11 +7,9 @@ env:
   DEVICE_CODENAME: "nx616j"
   KERNEL_SOURCE: "https://github.com/LineageOS/android_kernel_nubia_sdm845"
   KERNEL_BRANCH: "lineage-22.2"
-  CLANG_SOURCE: "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git"
-  CLANG_BRANCH: "lineage-20.0"
+  # 不再需要 CLANG_SOURCE 和 CLANG_BRANCH，改为直接下载
   DEFCONFIG_NAME: "merged_defconfig"
   MERGE_CONFIG_FILES: "arch/arm64/configs/vendor/nubia/sdm845_defconfig,arch/arm64/configs/vendor/nubia/nx616j.config"
-  # AnyKernel3 打包
   AK3_SOURCE: "https://github.com/osm0sis/AnyKernel3.git"
   AK3_BRANCH: "master"
 
@@ -28,8 +26,13 @@ jobs:
 
       - name: Setup Clang
         run: |
-          git clone --depth=1 ${{ env.CLANG_SOURCE }} -b ${{ env.CLANG_BRANCH }} clang
+          # 下载 Google AOSP 预编译 Clang (r536225)
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r536225.tar.gz -O clang.tar.gz
+          mkdir clang
+          tar -xzf clang.tar.gz -C clang
           echo "$(pwd)/clang/bin" >> $GITHUB_PATH
+          # 验证版本
+          clang --version
 
       - name: Setup GCC toolchains
         run: |
@@ -46,6 +49,13 @@ jobs:
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s nongki
+
+      - name: Fix bluetooth includes
+        run: |
+          cd kernel
+          sed -i 's/#include <btfm_slim\.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim.c
+          sed -i 's/#include <btfm_slim_wcn3990\.h>/#include "btfm_slim_wcn3990.h"/' drivers/bluetooth/btfm_slim.c
+          sed -i 's/#include <btfm_slim\.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim_wcn3990.h
 
       - name: Merge device configs
         run: |
@@ -98,11 +108,9 @@ jobs:
         run: |
           git clone --depth=1 ${{ env.AK3_SOURCE }} -b ${{ env.AK3_BRANCH }} anykernel3
           cp kernel/arch/arm64/boot/Image.gz anykernel3/
-          # 复制设备树文件（若有）
           cp kernel/arch/arm64/boot/dts/qcom/*.dtb anykernel3/ 2>/dev/null || true
-          # 解压模块到 anykernel3 的 modules 目录（可选）
           mkdir -p anykernel3/modules
-          tar -xzf kernel/modules.tar.gz -C anykernel3/modules 2>/dev/null || true
+          cp -r kernel/modules_install/lib/modules/* anykernel3/modules/ 2>/dev/null || true
 
       - name: Build flashable zip
         run: |
