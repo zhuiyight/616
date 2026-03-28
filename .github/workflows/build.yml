@@ -14,17 +14,19 @@ jobs:
             libncurses5-dev libssl-dev python3 libelf-dev bc cpio \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             ccache
-          # 不需要安装 clang/lld，后续手动下载
 
       - name: Setup custom Clang
         run: |
-          # 下载 ZyCromerZ 预编译 Clang
           wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20250721-release/Clang-16.0.6-20250721.tar.gz
           tar -xf Clang-16.0.6-20250721.tar.gz
-          # 移动到 /opt 并添加到 PATH
-          sudo mv clang-16.0.6 /opt/
+          extracted_dir=$(find . -maxdepth 1 -type d -name "Clang*" | head -1)
+          if [ -z "$extracted_dir" ]; then
+            echo "Error: Cannot find extracted directory"
+            exit 1
+          fi
+          echo "Extracted directory: $extracted_dir"
+          sudo mv "$extracted_dir" /opt/clang-16.0.6
           echo "/opt/clang-16.0.6/bin" >> $GITHUB_PATH
-          # 验证版本
           /opt/clang-16.0.6/bin/clang --version
 
       - name: Clone kernel source
@@ -50,13 +52,10 @@ jobs:
           export CC=clang
           export LLVM=1
           export LLVM_IAS=1
-          # 使用合并后的配置
           make merged_defconfig
-          # 确保 non-GKI 所需的选项开启
           scripts/config --enable KPROBES
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
-          # 关闭 BTF（4.9 内核不支持）
           scripts/config --disable DEBUG_INFO_BTF
           make olddefconfig
 
