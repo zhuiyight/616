@@ -1,4 +1,4 @@
-name: Build SDM845 Kernel with ReSukiSU
+name: Build Nubia SDM845 Kernel with ReSukiSU (non-GKI)
 
 on:
   workflow_dispatch:
@@ -22,15 +22,20 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_kernel_nubia_sdm845.git -b lineage-22.2 kernel
 
-      - name: Apply ReSukiSU
+      - name: Apply ReSukiSU for non-GKI
         run: |
           cd kernel
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          # 关键：non-GKI 必须使用 nongki 参数
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s nongki
+          # 如果需要 SUSFS 实验性功能，可替换为：
+          # curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs-main
 
-      - name: Merge device-specific configs
+      - name: Prepare configuration
         run: |
           cd kernel
-          # 合并基础 SoC 配置和机型配置
+          # 复制设备基础配置（该内核使用 vendor/nubia 下的配置）
+          # 注意：这个内核没有独立的 defconfig，需要直接使用 sdm845_defconfig + nx616j.config
+          # 但由于 merge_config.sh 可能要求特定路径，我们手动合并
           scripts/kconfig/merge_config.sh -m arch/arm64/configs/vendor/nubia/sdm845_defconfig \
                                            arch/arm64/configs/vendor/nubia/nx616j.config
           mv .config arch/arm64/configs/merged_defconfig
@@ -41,26 +46,43 @@ jobs:
           export ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
           # 使用合并后的配置
           make merged_defconfig
-          # 关闭 BTF 以加快编译（可选）
+          # 确保 non-GKI 所需的选项开启
+          scripts/config --enable KPROBES
+          scripts/config --enable MODULES
+          scripts/config --enable MODULE_UNLOAD
+          # 可选：开启 tracepoint hook（如果 ReSukiSU 需要）
+          # scripts/config --enable KSU_TRACEPOINT_HOOK
+          # 关闭 BTF（4.9 内核不支持）
           scripts/config --disable DEBUG_INFO_BTF
           make olddefconfig
 
-      - name: Build kernel
+      - name: Build kernel and modules
         run: |
           cd kernel
           export ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
-          # 编译内核映像和设备树
-          make -j$(nproc) Image.gz dtbs
+          # non-GKI 需要编译模块
+          make -j$(nproc) Image.gz dtbs modules
+
+      - name: Install modules
+        run: |
+          cd kernel
+          export ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1
+          # 将模块安装到临时目录
+          make INSTALL_MOD_PATH=./modules_install modules_install
 
       - name: Prepare artifacts
         run: |
           cd kernel
           mkdir -p out
+          # 内核映像
           cp arch/arm64/boot/Image.gz out/
+          # 设备树 blob（若有）
           cp arch/arm64/boot/dts/qcom/*.dtb out/ 2>/dev/null || true
+          # 内核模块（打包）
+          tar -czf out/modules.tar.gz -C modules_install/lib/modules .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sdm845-kernel-with-sukisu
+          name: nubia-sdm845-kernel-with-sukisu
           path: kernel/out/
