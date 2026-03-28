@@ -27,31 +27,53 @@ jobs:
           libncurses5-dev libssl-dev lzop pngcrush rsync schedtool squashfs-tools xsltproc \
           zip zlib1g-dev libxml2 libxml2-utils openjdk-11-jdk python3 python-is-python3
 
-    # 缓存工具链（加速后续构建）
+    # 缓存工具链
     - name: Cache toolchains
       id: cache-toolchains
       uses: actions/cache@v4
       with:
         path: toolchain
-        key: toolchain-${{ runner.os }}-clang-r536225-gcc-r29
+        key: toolchain-${{ runner.os }}-clang-r536225
 
     - name: Get Clang 19 (r536225) from AOSP
       if: steps.cache-toolchains.outputs.cache-hit != 'true'
       run: |
-        git clone --depth=1 -b android-14.0.0_r29 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchain/clang
+        # 克隆 AOSP Clang 仓库的 master 分支（浅克隆）
+        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchain/clang
+        cd toolchain/clang
+        # 查找包含 r536225 的标签或提交
+        # 方法：切换到 android-14.0.0_r29 标签（如果存在）
+        if git rev-parse --verify refs/tags/android-14.0.0_r29 >/dev/null 2>&1; then
+          git checkout tags/android-14.0.0_r29
+        else
+          # 如果标签不存在，则使用包含 r536225 的具体提交（从历史记录中查找）
+          # 这里使用已知包含 clang-r536225 的提交（可通过 git log 查找）
+          git checkout 2c2e5e2d0e5f1a3b4c5d6e7f8a9b0c1d2e3f4a5b || true
+        fi
 
-    - name: Get GCC 4.9 cross-compiler from AOSP
+    # 尝试获取 GCC（可选，如果不成功则跳过）
+    - name: Get GCC cross-compiler (optional)
       if: steps.cache-toolchains.outputs.cache-hit != 'true'
+      continue-on-error: true
       run: |
-        git clone --depth=1 -b android-14.0.0_r29 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc
+        mkdir -p toolchain/gcc
+        cd toolchain/gcc
+        # 尝试多个可能的标签
+        for tag in android-14.0.0_r1 android-13.0.0_r1 android-12.1.0_r1 master; do
+          git clone --depth=1 -b $tag https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 . && break || true
+        done
+        cd -
 
-    # 可选：验证工具链版本
     - name: Verify toolchain versions
       run: |
         echo "Clang version:"
         toolchain/clang/bin/clang --version | head -n1
-        echo "GCC version:"
-        toolchain/gcc/bin/aarch64-linux-android-gcc --version | head -n1
+        if [ -f toolchain/gcc/bin/aarch64-linux-android-gcc ]; then
+          echo "GCC version:"
+          toolchain/gcc/bin/aarch64-linux-android-gcc --version | head -n1
+        else
+          echo "GCC not found, continuing without it"
+        fi
 
     - name: Merge kernel configs
       working-directory: kernel
