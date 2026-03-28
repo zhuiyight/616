@@ -1,63 +1,53 @@
+
 name: Build NX616J Kernel
 
 on:
   push:
-    branches: [ main, master ]  # 根据你的默认分支调整
+    branches: [ main, master ]
   pull_request:
   workflow_dispatch:  # 允许手动触发
 
 env:
-  KERNEL_DIR: android_kernel_nubia_sdm845
+  KERNEL_DIR: .
   DEFCONFIG: vendor/nubia_sdm845_defconfig
   ARCH: arm64
-  CLANG_VERSION: r536225  # 对应 Clang 19.0.1
-  JOBS: ${{ (runner.os == 'Linux' && 4) || 2 }}
+  CLANG_VERSION: r536225  # 对应 Clang 19.0.1 (AOSP)
+  ANYKERNEL_REPO: https://github.com/your-username/AnyKernel3-nx616j.git  # ← 替换为你自己的 AnyKernel3 仓库（可选）
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 推荐使用较新 Ubuntu
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
-          path: ${{ env.KERNEL_DIR }}
           submodules: recursive
 
-      - name: Set up Python (for some kernel scripts)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - name: Set parallel jobs
+        run: |
+          echo "JOBS=$(nproc)" >> $GITHUB_ENV
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
-            bc \
-            bison \
-            build-essential \
-            flex \
-            libelf-dev \
-            libssl-dev \
-            lz4
+            bc bison build-essential flex libssl-dev libelf-dev \
+            lz4 wget git python3
 
       - name: Download AOSP Clang toolchain
         run: |
-          mkdir -p prebuilts/clang/host/linux-x86
-          cd prebuilts/clang/host/linux-x86
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${{ env.CLANG_VERSION }}.tar.gz -O clang.tar.gz
-          tar -xf clang.tar.gz
-          mv android-* clang
+          mkdir -p prebuilts/clang/host/linux-x86/clang
+          cd prebuilts/clang/host/linux-x86/clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${{ env.CLANG_VERSION }}.tar.gz -O - | tar xzf -
 
       - name: Configure kernel
-        working-directory: ${{ env.KERNEL_DIR }}
         run: |
           make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
 
-      - name: Build kernel Image.gz-dtb
-        working-directory: ${{ env.KERNEL_DIR }}
+      - name: Build kernel (Image.gz-dtb)
         run: |
-          PATH="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang/bin:$PATH" \
+          PATH="$PWD/prebuilts/clang/host/linux-x86/clang/bin:$PATH" \
           make -j${{ env.JOBS }} O=out \
             ARCH=${{ env.ARCH }} \
             CC=clang \
@@ -69,23 +59,49 @@ jobs:
             STRIP=llvm-strip \
             Image.gz-dtb
 
-      - name: Check if kernel built successfully
-        working-directory: ${{ env.KERNEL_DIR }}
+      - name: Verify kernel output
         run: |
           ls -lh out/arch/arm64/boot/Image.gz-dtb
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nx616j-kernel-${{ github.sha }}
-          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          name: Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb
           retention-days: 7
 
-      - name: Create Release (on push to main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      # =============== 可选：打包成 boot.img（需要你自己的 AnyKernel3 仓库）===============
+      - name: Checkout AnyKernel3 (optional)
+        if: env.ANYKERNEL_REPO != 'https://github.com/your-username/AnyKernel3-nx616j.git'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.repository.owner.name }}/AnyKernel3-nx616j
+          path: AnyKernel3
+          ref: main
+
+      - name: Package boot.img with AnyKernel3
+        if: env.ANYKERNEL_REPO != 'https://github.com/your-username/AnyKernel3-nx616j.git'
+        run: |
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../nx616j-boot.zip .
+
+      - name: Upload boot.zip (if packaged)
+        if: env.ANYKERNEL_REPO != 'https://github.com/your-username/AnyKernel3-nx616j.git'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nx616j-boot.zip
+          path: nx616j-boot.zip
+          retention-days: 7
+
+      # =============== 自动发布到 Release（仅限 main/master 分支推送）===============
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          files: |
+            out/arch/arm64/boot/Image.gz-dtb
+            nx616j-boot.zip
           tag_name: v$(date +%Y%m%d)-${{ github.sha }}
           name: Auto Build - ${{ github.sha }}
           draft: false
