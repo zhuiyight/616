@@ -10,54 +10,52 @@ env:
   KERNEL_DIR: .
   DEFCONFIG: vendor/nubia_sdm845_defconfig
   ARCH: arm64
-  CLANG_VERSION: 19.0.1
-  ANYKERNEL_REPO: https://github.com/your-username/AnyKernel3-nx616j.git
+  # 使用 LLVM 官方 Release 名称
+  CLANG_VERSION: clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout kernel source
+      - name: 🛎️ Checkout kernel source
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Set parallel jobs
-        run: echo "JOBS=$(nproc)" >> $GITHUB_ENV
-
-      - name: Install dependencies
+      - name: ⚙️ Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
             bc bison build-essential curl flex \
             gcc g++ git libssl-dev libtool \
             make ninja-build python3 python3-pip \
-            wget zip zlib1g-dev
+            wget zip zlib1g-dev cpio
 
-      - name: Download AOSP Clang toolchain
+      - name: 📦 Download LLVM 19.0.1 Toolchain
         run: |
-          mkdir -p prebuilts/clang/host/linux-x86/clang
-          cd prebuilts/clang/host/linux-x86/clang
-          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-19.0.1/clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xJf clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz --strip-components=1
+          # 下载并解压 Clang
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-19.0.1/${{ env.CLANG_VERSION }}.tar.xz
+          sudo tar -xJf ${CLANG_VERSION}.tar.xz -C /usr/local --strip-components=1
+          # 验证安装
+          clang --version
 
-      - name: Configure kernel
+      - name: 📝 Configure kernel
         run: |
-          cd ${{ env.KERNEL_DIR }}
-          make O=out ${ARCH:+ARCH=${ARCH}} ${CROSS_COMPILE:+CROSS_COMPILE=${CROSS_COMPILE}} ${DEFCONFIG}
+          make O=out ARCH=${{ env.ARCH }} ${CROSS_COMPILE:+CROSS_COMPILE=${CROSS_COMPILE}} ${{ env.DEFCONFIG }}
 
-      - name: Build kernel
+      - name: 🏗️ Build kernel
         run: |
-          cd ${{ env.KERNEL_DIR }}
-          make -j${{ env.JOBS }} O=out \
-            ${ARCH:+ARCH=${ARCH}} \
-            ${CROSS_COMPILE:+CROSS_COMPILE=${CROSS_COMPILE}} \
+          make -j$(nproc) O=out \
+            ARCH=${{ env.ARCH }} \
+            CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image.gz-dtb
 
-      - name: Upload kernel image
-        uses: actions/upload-artifact@v3
+      - name: 📤 Upload kernel artifact (Fixed v4)
+        uses: actions/upload-artifact@v4  # 关键修复：升级到 v4
         with:
-          name: kernel-image
-          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          name: NX616J-Kernel
+          path: out/arch/arm64/boot/Image.gz-dtb  # 修正路径，确保能找到文件
+          retention-days: 7
