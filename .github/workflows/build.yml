@@ -1,18 +1,17 @@
-
 name: Build NX616J Kernel
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 env:
   KERNEL_DIR: .
   DEFCONFIG: vendor/nubia_sdm845_defconfig
   ARCH: arm64
-  CLANG_VERSION: r536225  # 对应 Clang 19.0.1 (AOSP)
-  ANYKERNEL_REPO: https://github.com/your-username/AnyKernel3-nx616j.git  # ← 替换为你自己的 AnyKernel3 仓库（可选）
+  CLANG_VERSION: 19.0.1
+  ANYKERNEL_REPO: https://github.com/your-username/AnyKernel3-nx616j.git
 
 jobs:
   build:
@@ -25,86 +24,40 @@ jobs:
           submodules: recursive
 
       - name: Set parallel jobs
-        run: |
-          echo "JOBS=$(nproc)" >> $GITHUB_ENV
+        run: echo "JOBS=$(nproc)" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
-            bc bison build-essential flex libssl-dev libelf-dev \
-            lz4 wget git python3
+            bc bison build-essential curl flex \
+            gcc g++ git libssl-dev libtool \
+            make ninja-build python3 python3-pip \
+            wget zip zlib1g-dev
 
       - name: Download AOSP Clang toolchain
         run: |
           mkdir -p prebuilts/clang/host/linux-x86/clang
           cd prebuilts/clang/host/linux-x86/clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${{ env.CLANG_VERSION }}.tar.gz -O - | tar xzf -
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-19.0.1/clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xJf clang+llvm-19.0.1-x86_64-linux-gnu-ubuntu-22.04.tar.xz --strip-components=1
 
       - name: Configure kernel
         run: |
-          make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
+          cd ${{ env.KERNEL_DIR }}
+          make O=out ${ARCH:+ARCH=${ARCH}} ${CROSS_COMPILE:+CROSS_COMPILE=${CROSS_COMPILE}} ${DEFCONFIG}
 
-      - name: Build kernel (Image.gz-dtb)
+      - name: Build kernel
         run: |
-          PATH="$PWD/prebuilts/clang/host/linux-x86/clang/bin:$PATH" \
+          cd ${{ env.KERNEL_DIR }}
           make -j${{ env.JOBS }} O=out \
-            ARCH=${{ env.ARCH }} \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            Image.gz-dtb
+            ${ARCH:+ARCH=${ARCH}} \
+            ${CROSS_COMPILE:+CROSS_COMPILE=${CROSS_COMPILE}} \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-      - name: Verify kernel output
-        run: |
-          ls -lh out/arch/arm64/boot/Image.gz-dtb
-
-      - name: Upload kernel artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v3
         with:
-          name: Image.gz-dtb
-          path: out/arch/arm64/boot/Image.gz-dtb
-          retention-days: 7
-
-      # =============== 可选：打包成 boot.img（需要你自己的 AnyKernel3 仓库）===============
-      - name: Checkout AnyKernel3 (optional)
-        if: env.ANYKERNEL_REPO != 'https://github.com/your-username/AnyKernel3-nx616j.git'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.repository.owner.name }}/AnyKernel3-nx616j
-          path: AnyKernel3
-          ref: main
-
-      - name: Package boot.img with AnyKernel3
-        if: env.ANYKERNEL_REPO != 'https://github.com/your-username/AnyKernel3-nx616j.git'
-        run: |
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cd AnyKernel3
-          zip -r9 ../nx616j-boot.zip .
-
-      - name: Upload boot.zip (if packaged)
-        if: env.ANYKERNEL_REPO != 'https://github.com/your-username/AnyKernel3-nx616j.git'
-        uses: actions/upload-artifact@v4
-        with:
-          name: nx616j-boot.zip
-          path: nx616j-boot.zip
-          retention-days: 7
-
-      # =============== 自动发布到 Release（仅限 main/master 分支推送）===============
-      - name: Create GitHub Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            out/arch/arm64/boot/Image.gz-dtb
-            nx616j-boot.zip
-          tag_name: v$(date +%Y%m%d)-${{ github.sha }}
-          name: Auto Build - ${{ github.sha }}
-          draft: false
-          prerelease: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: kernel-image
+          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
