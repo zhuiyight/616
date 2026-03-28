@@ -27,25 +27,31 @@ jobs:
           libncurses5-dev libssl-dev lzop pngcrush rsync schedtool squashfs-tools xsltproc \
           zip zlib1g-dev libxml2 libxml2-utils openjdk-11-jdk python3 python-is-python3
 
-    - name: Get Clang 19 toolchain
-      uses: actions/checkout@v4
+    # 缓存工具链（可选，加速后续构建）
+    - name: Cache toolchains
+      id: cache-toolchains
+      uses: actions/cache@v4
       with:
-        repository: android/prebuilts_clang_host_linux-x86
-        # 使用与内核编译日志匹配的 clang-r536225 分支
-        ref: clang-r536225
-        path: toolchain/clang
+        path: toolchain
+        key: toolchain-${{ runner.os }}-clang-r536225-gcc-r29
+
+    - name: Get Clang 19 toolchain
+      if: steps.cache-toolchains.outputs.cache-hit != 'true'
+      run: |
+        git clone --depth=1 -b clang-r536225 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 toolchain/clang
 
     - name: Get GCC 4.9 cross-compiler
-      uses: actions/checkout@v4
-      with:
-        repository: android/prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9
-        # 使用与 Android 14 匹配的标签，可根据需要调整
-        ref: android-14.0.0_r29
-        path: toolchain/gcc
+      if: steps.cache-toolchains.outputs.cache-hit != 'true'
+      run: |
+        git clone --depth=1 -b android-14.0.0_r29 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc
 
     - name: Merge kernel configs
       working-directory: kernel
       run: |
+        # 如果选择 clean_build，删除之前的输出
+        if [ "${{ github.event.inputs.clean_build }}" == "true" ]; then
+          rm -rf out
+        fi
         cp arch/arm64/configs/vendor/nubia/sdm845_defconfig .config
         scripts/kconfig/merge_config.sh -m -O . .config arch/arm64/configs/vendor/nubia/nx616j.config
         make ARCH=arm64 olddefconfig
@@ -54,14 +60,13 @@ jobs:
       working-directory: kernel
       env:
         PATH: ${{ github.workspace }}/toolchain/clang/bin:${{ github.workspace }}/toolchain/gcc/bin:$PATH
+        LD_LIBRARY_PATH: ${{ github.workspace }}/toolchain/clang/lib:$LD_LIBRARY_PATH
       run: |
-        # 设置交叉编译环境变量
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-        export LD_LIBRARY_PATH=${{ github.workspace }}/toolchain/clang/lib:$LD_LIBRARY_PATH
-
-        # 编译内核
+        # 如果使用 O=out 输出目录，可取消注释并相应调整后续路径
+        # make O=out -j$(nproc) ARCH=arm64 \
         make -j$(nproc) ARCH=arm64 \
           CC=clang \
           LD=ld.lld \
@@ -78,7 +83,9 @@ jobs:
     - name: Package kernel artifacts
       run: |
         mkdir -p kernel_artifacts
+        # 如果使用 O=out 输出目录，请相应修改路径
         cp kernel/arch/arm64/boot/Image.gz-dtb kernel_artifacts/
+        # 安装模块到临时目录并打包
         mkdir -p kernel_modules
         make -C kernel ARCH=arm64 \
           INSTALL_MOD_PATH=${{ github.workspace }}/kernel_modules \
