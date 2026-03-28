@@ -1,97 +1,94 @@
-name: Build ReSukiSU for Nubia X NX616J (Config Merged)
+name: Build NX616J Kernel
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main, master ]  # 根据你的默认分支调整
+  pull_request:
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  KERNEL_DIR: android_kernel_nubia_sdm845
+  DEFCONFIG: vendor/nubia_sdm845_defconfig
+  ARCH: arm64
+  CLANG_VERSION: r536225  # 对应 Clang 19.0.1
+  JOBS: ${{ (runner.os == 'Linux' && 4) || 2 }}
 
 jobs:
   build:
-    name: Build ReSukiSU by ${{ github.actor }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # 推荐使用较新 Ubuntu
+
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          path: ${{ env.KERNEL_DIR }}
+          submodules: recursive
 
-    - name: Setup All Configuration
-      run: |
-        # 设备核心配置（已合并原 config.env）
-        echo "KERNEL_SOURCE=https://github.com/LineageOS/android_kernel_nubia_sdm845" >> $GITHUB_ENV
-        echo "KERNEL_SOURCE_BRANCH=lineage-22.2" >> $GITHUB_ENV
-        echo "KERNEL_DEFCONFIG=vendor/nubia/sdm845_defconfig" >> $GITHUB_ENV
-        echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
-        echo "KERNEL_FILE=Image.lz4" >> $GITHUB_ENV
-        echo "CLANG_VERSION=19.0.1" >> $GITHUB_ENV
-        echo "BUILD_EXTRA_COMMAND=" >> $GITHUB_ENV
-        echo "USE_KERNELSU=false" >> $GITHUB_ENV
-        echo "MAKE_BOOT_IMAGE=false" >> $GITHUB_ENV
-        echo "BOOT_SIGNATURE=false" >> $GITHUB_ENV
-        echo "SOURCE_BOOT_IMAGE=" >> $GITHUB_ENV
-        # 构建信息
-        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "DEVICE=NX616J" >> $GITHUB_ENV
-        echo "UPLOADNAME=-ReSukiSU" >> $GITHUB_ENV
+      - name: Set up Python (for some kernel scripts)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Install build dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y git build-essential llvm lld clang-19 \
-          bc bison flex libssl-dev libelf-dev python3 python3-pip zip \
-          gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
-        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
-        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            lz4
 
-    - name: Clone kernel source
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth=1
+      - name: Download AOSP Clang toolchain
+        run: |
+          mkdir -p prebuilts/clang/host/linux-x86
+          cd prebuilts/clang/host/linux-x86
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${{ env.CLANG_VERSION }}.tar.gz -O clang.tar.gz
+          tar -xf clang.tar.gz
+          mv android-* clang
 
-    - name: Apply ReSukiSU patch
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s
+      - name: Configure kernel
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
 
-    - name: Fix all header include errors
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        # 修复蓝牙模块头文件错误（所有相关文件）
-        sed -i 's/#include <btfm_slim_wcn3990.h>/#include "btfm_slim_wcn3990.h"/' drivers/bluetooth/btfm_slim.c
-        sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim_wcn3990.h
-        sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim.c
-        sed -i 's/#include <btfm_slim.h>/#include "btfm_slim.h"/' drivers/bluetooth/btfm_slim_codec.c  # 新增修复 btfm_slim_codec.c
-        # 修复 fuse 模块头文件格式（避免语法错乱）
-        sed -i 's/#include <../mount.h>/#include "../mount.h"/' fs/fuse/file_observer.c
+      - name: Build kernel Image.gz-dtb
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          PATH="$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang/bin:$PATH" \
+          make -j${{ env.JOBS }} O=out \
+            ARCH=${{ env.ARCH }} \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            Image.gz-dtb
 
-    - name: Configure and build kernel
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=clang
-        export LLVM=1
-        export LD=ld.lld
-        # 加载设备默认配置
-        make ${{ env.KERNEL_DEFCONFIG }}
-        # 核心修复：禁用32位vDSO + 栈保护适配 + 禁用FUSE模块（绕开语法错误）
-        scripts/config --disable CONFIG_COMPAT_VDSO
-        scripts/config --disable CONFIG_CC_STACKPROTECTOR_STRONG
-        scripts/config --enable CONFIG_CC_STACKPROTECTOR_REGULAR
-        scripts/config --disable CONFIG_FUSE_FS  # 禁用FUSE模块，避免文件语法错误
-        # 开始编译
-        make -j$(nproc) ARCH=arm64 Image.lz4
+      - name: Check if kernel built successfully
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
 
-    - name: Pack with AnyKernel3
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone https://github.com/osm0sis/AnyKernel3.git --depth=1
-        cd AnyKernel3
-        cp ../android-kernel/arch/arm64/boot/Image.lz4 .
-        # 匹配 Nubia X 设备
-        sed -i 's/device.name1=.*/device.name1=NX616J/' anykernel.sh
-        sed -i 's/device.name2=.*/device.name2=nx616j/' anykernel.sh
-        sed -i 's/device.name3=.*/device.name3=Nubia X/' anykernel.sh
-        zip -r ../ReSukiSU-${{ env.DEVICE }}-${{ env.BUILD_TIME }}.zip *
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nx616j-kernel-${{ github.sha }}
+          path: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          retention-days: 7
 
-    - name: Upload final package
-      uses: actions/upload-artifact@v4
-      with:
-        name: ReSukiSU-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
-        path: $GITHUB_WORKSPACE/ReSukiSU-*.zip
+      - name: Create Release (on push to main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          tag_name: v$(date +%Y%m%d)-${{ github.sha }}
+          name: Auto Build - ${{ github.sha }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
