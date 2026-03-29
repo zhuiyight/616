@@ -25,7 +25,6 @@ jobs:
 
       - name: Setup Clang
         run: |
-          # 下载指定版本的 Clang
           wget -q https://pub-518e5c4602fc4016aa4a80856eaa0ad4.r2.dev/clang-r536225.tar.gz -O clang.tar.gz
           mkdir clang
           tar -xzf clang.tar.gz -C clang --strip-components=1
@@ -76,6 +75,7 @@ jobs:
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           scripts/config --disable DEBUG_INFO_BTF
+          scripts/config --disable COMPAT_VDSO   # 禁用 32 位 vDSO 避免链接错误
           make olddefconfig
 
       - name: Build kernel and modules
