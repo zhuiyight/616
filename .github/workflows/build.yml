@@ -26,10 +26,8 @@ jobs:
       - name: Install system LLVM tools (for ld.lld and llvm-objdump)
         run: |
           sudo apt install -y lld-14 llvm-14
-          # 创建符号链接，使 make 能直接找到 llvm-objdump 和 ld.lld
           sudo ln -sf /usr/bin/llvm-objdump-14 /usr/local/bin/llvm-objdump
           sudo ln -sf /usr/bin/ld.lld-14 /usr/local/bin/ld.lld
-          # 验证
           llvm-objdump --version
           ld.lld --version
 
@@ -81,13 +79,13 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
-          # 让 make 使用系统的 ld.lld 和 llvm-objdump（已通过 PATH 或符号链接可用）
           make ${{ env.DEFCONFIG_NAME }}
           scripts/config --enable KPROBES
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           scripts/config --disable DEBUG_INFO_BTF
           scripts/config --disable COMPAT_VDSO
+          scripts/config --disable VDSO        # 彻底禁用 vDSO，避免符号未定义
           make olddefconfig
 
       - name: Build kernel and modules
