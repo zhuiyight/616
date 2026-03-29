@@ -29,15 +29,10 @@ jobs:
           mkdir clang
           tar -xzf clang.tar.gz -C clang --strip-components=1
           echo "$(pwd)/clang/bin" >> $GITHUB_PATH
-          # 验证 LLVM 工具链
-          echo "=== Clang version ==="
+          # 验证工具链
           clang --version
-          echo "=== llvm-objdump ==="
-          which llvm-objdump || echo "llvm-objdump not found"
-          llvm-objdump --version || echo "llvm-objdump not executable"
-          echo "=== ld.lld ==="
-          which ld.lld || echo "ld.lld not found"
-          ld.lld --version || echo "ld.lld not executable"
+          which ld.lld
+          ld.lld --version
 
       - name: Setup GCC toolchains
         run: |
@@ -75,16 +70,19 @@ jobs:
           export CC=clang
           export LLVM=1
           export LLVM_IAS=1
-          export LD=ld.lld                     # 显式指定链接器
+          export LD=ld.lld
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           make ${{ env.DEFCONFIG_NAME }}
+          # 启用必要选项
           scripts/config --enable KPROBES
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           scripts/config --disable DEBUG_INFO_BTF
-          # 不再禁用 COMPAT_VDSO，让 vdso32 使用 ld.lld 构建
+          # 关键：禁用 32 位 vDSO 构建
+          scripts/config --disable COMPAT_VDSO
+          # 重新生成配置
           make olddefconfig
 
       - name: Build kernel and modules
