@@ -7,7 +7,6 @@ env:
   DEVICE_CODENAME: "nx616j"
   KERNEL_SOURCE: "https://github.com/LineageOS/android_kernel_nubia_sdm845"
   KERNEL_BRANCH: "lineage-22.2"
-  # 不再需要 CLANG_SOURCE 和 CLANG_BRANCH，改为直接下载
   DEFCONFIG_NAME: "merged_defconfig"
   MERGE_CONFIG_FILES: "arch/arm64/configs/vendor/nubia/sdm845_defconfig,arch/arm64/configs/vendor/nubia/nx616j.config"
   AK3_SOURCE: "https://github.com/osm0sis/AnyKernel3.git"
@@ -26,12 +25,11 @@ jobs:
 
       - name: Setup Clang
         run: |
-          # 下载 Google AOSP 预编译 Clang (r536225)
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r536225.tar.gz -O clang.tar.gz
+          # 下载指定版本的 Clang
+          wget -q https://pub-518e5c4602fc4016aa4a80856eaa0ad4.r2.dev/clang-r536225.tar.gz -O clang.tar.gz
           mkdir clang
-          tar -xzf clang.tar.gz -C clang
+          tar -xzf clang.tar.gz -C clang --strip-components=1
           echo "$(pwd)/clang/bin" >> $GITHUB_PATH
-          # 验证版本
           clang --version
 
       - name: Setup GCC toolchains
