@@ -68,14 +68,13 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           bash ./setup.sh
 
-      - name: Clone and Integrate SuSFS (4.9)
+      - name: Clone and Integrate SuSFS
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          git clone --branch 4.9 --recurse-submodules https://gitlab.com/simonpunk/susfs4ksu.git
+          git clone --recurse-submodules https://gitlab.com/simonpunk/susfs4ksu.git
           if [ ! -d drivers/susfs ]; then
             ln -sf ../susfs4ksu/drivers/susfs drivers/susfs
           fi
-          # 兼容两种可能的头文件路径
           if [ -d susfs4ksu/kernel/include ]; then
             cp susfs4ksu/kernel/include/* include/linux/
           elif [ -d susfs4ksu/include ]; then
