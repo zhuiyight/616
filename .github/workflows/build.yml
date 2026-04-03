@@ -68,37 +68,11 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           bash ./setup.sh
 
-      - name: Clone and Integrate SuSFS
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          git clone --recurse-submodules https://gitlab.com/simonpunk/susfs4ksu.git
-          
-          # 复制驱动目录（确保 Kconfig 和 Makefile 存在）
-          if [ -d susfs4ksu/drivers/susfs ]; then
-            cp -r susfs4ksu/drivers/susfs drivers/
-          else
-            echo "Error: susfs4ksu/drivers/susfs not found"
-            exit 1
-          fi
-          
-          # 复制头文件（查找所有 .h）
-          find susfs4ksu -name "*.h" -exec cp {} include/linux/ \;
-          
-          # 如果 drivers/Kconfig 尚未包含 susfs 的 source，则添加
-          if ! grep -q "source \"drivers/susfs/Kconfig\"" drivers/Kconfig; then
-            echo 'source "drivers/susfs/Kconfig"' >> drivers/Kconfig
-          fi
-          
-          # 如果 drivers/Makefile 尚未包含 susfs 的 obj，则添加
-          if ! grep -q "obj-\$(CONFIG_SUSFS) += susfs/" drivers/Makefile; then
-            echo 'obj-$(CONFIG_SUSFS) += susfs/' >> drivers/Makefile
-          fi
-
-      - name: Clone NonGKI Patch Tool (Backport Scripts)
+      - name: Clone NonGKI Patch Tool (includes SuSFS backports)
         run: |
           git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git $GITHUB_WORKSPACE/kernel_workspace/nongki_tool
 
-      - name: Run NonGKI backport patch scripts
+      - name: Run NonGKI backport patches (KSU + SuSFS)
         run: |
           cp -a $GITHUB_WORKSPACE/kernel_workspace/nongki_tool/Patches $GITHUB_WORKSPACE/kernel_workspace/android-kernel/Patches
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
@@ -110,11 +84,13 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export CROSS_COMPILE=aarch64-linux-gnu-
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=$CROSS_COMPILE lineage_nx616j_defconfig
+          # 启用 KSU 和 SuSFS 相关配置（具体选项名称可能因补丁版本而异）
           ./scripts/config --file out/.config \
             --enable CONFIG_KSU \
             --enable CONFIG_KSU_SUSFS \
             --enable CONFIG_SUSFS
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+          # 验证
           grep -E "CONFIG_KSU=y|CONFIG_SUSFS=y" out/.config || (echo "KSU/SuSFS not enabled" && exit 1)
 
       - name: Build kernel
