@@ -7,6 +7,7 @@ jobs:
   build:
     name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +44,6 @@ jobs:
           mkdir gcc64
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64 -zxf gcc64.tar.gz
-
           mkdir gcc32
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
           tar -C gcc32 -zxf gcc32.tar.gz
@@ -73,12 +73,13 @@ jobs:
       - name: Clone and Integrate SuSFS
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          git clone --recurse-submodules https://gitlab.com/simonpunk/susfs4ksu.git
           if [ ! -d drivers/susfs ]; then
             ln -sf ../susfs4ksu/drivers/susfs drivers/susfs
           fi
-          cp susfs4ksu/include/* include/linux/
-          # 确保Kconfig/Makefile注入 (如已手动配置可跳过)：
+          # 复制 kernel/include 下所有头文件
+          cp susfs4ksu/kernel/include/* include/linux/
+          # 确保 Kconfig / Makefile 引用
           grep 'source "drivers/susfs/Kconfig"' drivers/Kconfig || \
             echo 'source "drivers/susfs/Kconfig"' >> drivers/Kconfig
           grep 'obj-$(CONFIG_SUSFS) += susfs/' drivers/Makefile || \
@@ -108,7 +109,7 @@ jobs:
             CROSS_COMPILE_ARM32=$GCC32 \
             LD=ld.lld LLVM=1 LLVM_IAS=1 \
             lineage_nx616j_defconfig
-          # 强制内置KSU和SuSFS
+          # 强制内置 KSU & SuSFS
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_KSU_SUSFS=y" >> out/.config
           echo "CONFIG_SUSFS=y" >> out/.config
