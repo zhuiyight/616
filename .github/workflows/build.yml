@@ -72,22 +72,27 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           git clone --recurse-submodules https://gitlab.com/simonpunk/susfs4ksu.git
-          if [ ! -d drivers/susfs ]; then
-            ln -sf ../susfs4ksu/drivers/susfs drivers/susfs
-          fi
-          # 查找并复制所有头文件（通常位于 include/linux/ 下）
-          if [ -d susfs4ksu/include/linux ]; then
-            cp susfs4ksu/include/linux/* include/linux/
-          elif [ -d susfs4ksu/kernel/include/linux ]; then
-            cp susfs4ksu/kernel/include/linux/* include/linux/
+          
+          # 复制驱动目录（确保 Kconfig 和 Makefile 存在）
+          if [ -d susfs4ksu/drivers/susfs ]; then
+            cp -r susfs4ksu/drivers/susfs drivers/
           else
-            # 尝试递归查找所有 .h 文件
-            find susfs4ksu -name "*.h" -exec cp {} include/linux/ \;
+            echo "Error: susfs4ksu/drivers/susfs not found"
+            exit 1
           fi
-          grep 'source "drivers/susfs/Kconfig"' drivers/Kconfig || \
+          
+          # 复制头文件（查找所有 .h）
+          find susfs4ksu -name "*.h" -exec cp {} include/linux/ \;
+          
+          # 如果 drivers/Kconfig 尚未包含 susfs 的 source，则添加
+          if ! grep -q "source \"drivers/susfs/Kconfig\"" drivers/Kconfig; then
             echo 'source "drivers/susfs/Kconfig"' >> drivers/Kconfig
-          grep 'obj-$(CONFIG_SUSFS) += susfs/' drivers/Makefile || \
+          fi
+          
+          # 如果 drivers/Makefile 尚未包含 susfs 的 obj，则添加
+          if ! grep -q "obj-\$(CONFIG_SUSFS) += susfs/" drivers/Makefile; then
             echo 'obj-$(CONFIG_SUSFS) += susfs/' >> drivers/Makefile
+          fi
 
       - name: Clone NonGKI Patch Tool (Backport Scripts)
         run: |
