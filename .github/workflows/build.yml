@@ -1,4 +1,5 @@
-name: Build Kernel with ReSukiSU KSU内置 for nx616j
+name: Build Kernel with ReSukiSU & SuSFS for nx616j
+
 on:
   workflow_dispatch:
 
@@ -16,7 +17,7 @@ jobs:
           echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
           echo "CLANG_VERSION=r487747c" >> $GITHUB_ENV
           echo "DEVICE=nx616j" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date '+%Y%m%d%H%M')" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
@@ -59,16 +60,29 @@ jobs:
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
 
-      # ↓↓↓↓↓ ReSukiSU集成以及补丁步骤↓↓↓↓↓
       - name: Clone ReSukiSU
         run: |
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git $GITHUB_WORKSPACE/kernel_workspace/ReSukiSU
 
-      - name: Integrate ReSukiSU to kernel
+      - name: Integrate ReSukiSU
         run: |
           cp $GITHUB_WORKSPACE/kernel_workspace/ReSukiSU/kernel/setup.sh $GITHUB_WORKSPACE/kernel_workspace/android-kernel/
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           bash ./setup.sh
+
+      - name: Clone and Integrate SuSFS
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          if [ ! -d drivers/susfs ]; then
+            ln -sf ../susfs4ksu/drivers/susfs drivers/susfs
+          fi
+          cp susfs4ksu/include/* include/linux/
+          # 确保Kconfig/Makefile注入 (如已手动配置可跳过)：
+          grep 'source "drivers/susfs/Kconfig"' drivers/Kconfig || \
+            echo 'source "drivers/susfs/Kconfig"' >> drivers/Kconfig
+          grep 'obj-$(CONFIG_SUSFS) += susfs/' drivers/Makefile || \
+            echo 'obj-$(CONFIG_SUSFS) += susfs/' >> drivers/Makefile
 
       - name: Clone NonGKI Patch Tool (Backport Scripts)
         run: |
@@ -80,14 +94,12 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           bash ./Patches/backport_patches.sh || true
 
-      # 强制添加KSU为内置 & olddefconfig
-      - name: Update KSU config, use olddefconfig
+      - name: Update KSU/SuSFS config, use olddefconfig
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           export GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
-          # 这里用你的内核合并后的 defconfig
           make -j$(nproc) O=out \
             ARCH=arm64 \
             CC=clang \
@@ -96,9 +108,10 @@ jobs:
             CROSS_COMPILE_ARM32=$GCC32 \
             LD=ld.lld LLVM=1 LLVM_IAS=1 \
             lineage_nx616j_defconfig
-          # 手动配置KSU内置
+          # 强制内置KSU和SuSFS
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_KSU_SUSFS=y" >> out/.config
+          echo "CONFIG_SUSFS=y" >> out/.config
           yes "" | make -j$(nproc) O=out \
             ARCH=arm64 \
             CC=clang \
@@ -107,6 +120,7 @@ jobs:
             CROSS_COMPILE_ARM32=$GCC32 \
             LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
           grep KSU out/.config || (echo "KSU未生效，检查Kconfig/集成" && exit 1)
+          grep SUSFS out/.config || (echo "SuSFS未生效，检查Kconfig/集成" && exit 1)
 
       - name: Build kernel
         run: |
