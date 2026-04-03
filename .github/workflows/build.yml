@@ -75,13 +75,14 @@ jobs:
           if [ ! -d drivers/susfs ]; then
             ln -sf ../susfs4ksu/drivers/susfs drivers/susfs
           fi
-          if [ -d susfs4ksu/kernel/include ]; then
-            cp susfs4ksu/kernel/include/* include/linux/
-          elif [ -d susfs4ksu/include ]; then
-            cp susfs4ksu/include/* include/linux/
+          # 查找并复制所有头文件（通常位于 include/linux/ 下）
+          if [ -d susfs4ksu/include/linux ]; then
+            cp susfs4ksu/include/linux/* include/linux/
+          elif [ -d susfs4ksu/kernel/include/linux ]; then
+            cp susfs4ksu/kernel/include/linux/* include/linux/
           else
-            echo "Error: Cannot find headers in susfs4ksu"
-            exit 1
+            # 尝试递归查找所有 .h 文件
+            find susfs4ksu -name "*.h" -exec cp {} include/linux/ \;
           fi
           grep 'source "drivers/susfs/Kconfig"' drivers/Kconfig || \
             echo 'source "drivers/susfs/Kconfig"' >> drivers/Kconfig
