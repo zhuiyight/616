@@ -39,6 +39,16 @@ jobs:
           tar -C clang-aosp/ -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
           chmod +x clang-aosp/bin/clang
 
+      - name: Download GCC 64 & 32 (for compat vDSO)
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir gcc64
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
+          tar -C gcc64 -zxf gcc64.tar.gz
+          mkdir gcc32
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
+          tar -C gcc32 -zxf gcc32.tar.gz
+
       - name: Clone kernel source
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
@@ -82,23 +92,31 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=$CROSS_COMPILE lineage_nx616j_defconfig
-          # 启用 KSU 和 SuSFS 相关配置（具体选项名称可能因补丁版本而异）
+          export CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+            lineage_nx616j_defconfig
           ./scripts/config --file out/.config \
             --enable CONFIG_KSU \
             --enable CONFIG_KSU_SUSFS \
             --enable CONFIG_SUSFS
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=$CROSS_COMPILE olddefconfig
-          # 验证
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+            olddefconfig
           grep -E "CONFIG_KSU=y|CONFIG_SUSFS=y" out/.config || (echo "KSU/SuSFS not enabled" && exit 1)
 
       - name: Build kernel
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=$CROSS_COMPILE
+          export CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
+          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
 
       - name: Prepare AnyKernel3
         run: |
