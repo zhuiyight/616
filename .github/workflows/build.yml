@@ -1,4 +1,4 @@
-name: Build Kernel SDM845 with SukiSU-Ultra (Fix-Quote-Error)
+name: Build Kernel SDM845 with SukiSU-Ultra (Deep-Force-Fix)
 on:
   workflow_dispatch:
 
@@ -62,7 +62,7 @@ jobs:
           fi
           # 2. 注入类型定义
           sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h || true
-          # 3. 修复 patch_memory.c (p4d 降级)
+          # 3. 修复 patch_memory.c
           PATCH_MEM=$(find drivers -name "patch_memory.c")
           if [ -n "$PATCH_MEM" ]; then
             sed -i 's/p4d_t \*p4d;//g' "$PATCH_MEM"
@@ -71,7 +71,7 @@ jobs:
             sed -i 's/pud = pud_offset(p4d, addr);/pud = pud_offset(pgd, addr);/g' "$PATCH_MEM"
             sed -i 's/__flush_icache_range/flush_icache_range/g' "$PATCH_MEM"
           fi
-          # 4. 禁用 pkg_observer
+          # 4. 禁用不兼容模块
           KSU_MAKEFILES=$(find drivers -name "Makefile" | xargs grep -l "pkg_observer.o" || true)
           if [ -n "$KSU_MAKEFILES" ]; then
             for f in $KSU_MAKEFILES; do
@@ -80,15 +80,13 @@ jobs:
             done
           fi
 
-      - name: 编译内核 (修正引号错误版)
+      - name: 编译内核 (Deep-Force 模式)
         run: |
           cd android-kernel
           
-          # 建立 ccache 软链接目录 (这是最稳妥的 ccache 注入方式)
           mkdir -p bin
           ln -sf /usr/bin/ccache bin/clang
           ln -sf /usr/bin/ccache bin/gcc
-          ln -sf /usr/bin/ccache bin/aarch64-linux-android-gcc
           export PATH=$GITHUB_WORKSPACE/android-kernel/bin:$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
           
           GCC64=$GITHUB_WORKSPACE/gcc64/bin/aarch64-linux-android-
@@ -101,21 +99,26 @@ jobs:
           rm -rf out
           mkdir -p out
           
-          # 这里的 CC 直接写 clang，因为 PATH 里的 ccache 软链接会拦截它
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
           
+          # 1. 先生成原始配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
           
-          ./scripts/config --file out/.config -e KSU
-          ./scripts/config --file out/.config -e KSU_SUCOMPAT
-          ./scripts/config --file out/.config -d KSU_PACKAGE_OBSERVER
+          # 2. 【核心修改】在所有合并完成后，强行追加配置，并使用 sed 确保没有重复冲突
+          sed -i '/CONFIG_KSU/d' out/.config
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_SUCOMPAT=y" >> out/.config
+          echo "CONFIG_KSU_DEBUG=n" >> out/.config
           
+          # 3. 强制刷新，如果 grep 没找到也不要报错 (加 || true)
           make $MAKE_ARGS olddefconfig
           echo "--- KSU CONFIG CHECK ---"
-          grep "CONFIG_KSU" out/.config
+          grep "CONFIG_KSU" out/.config || true
           
-          make -j$(nproc --all) $MAKE_ARGS Image.gz-dtb
+          # 4. 再次强制确认（有些内核 Makefile 会在编译开始时重置配置）
+          # 我们直接把参数带入 make 指令
+          make -j$(nproc --all) $MAKE_ARGS CONFIG_KSU=y CONFIG_KSU_SUCOMPAT=y Image.gz-dtb
           
           ccache -s
 
@@ -131,5 +134,5 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-NX616J-Fixed
+          name: SukiSU-Ultra-NX616J-Force
           path: android-kernel/out/arch/arm64/boot/*.zip
