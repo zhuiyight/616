@@ -1,4 +1,4 @@
-name: Build Kernel SDM845 with SukiSU-Ultra (ccache-Enabled)
+name: Build Kernel SDM845 with SukiSU-Ultra (Force-Compile-Fix)
 on:
   workflow_dispatch:
 
@@ -15,7 +15,7 @@ jobs:
           sudo apt-get install -y git automake flex lzop bison build-essential zip curl \
             bc libssl-dev device-tree-compiler python3 libncurses-dev ccache
 
-      - name: 缓存管理 (工具链与 ccache 数据)
+      - name: 缓存管理 (仅缓存工具链和 ccache)
         uses: actions/cache@v4
         with:
           path: |
@@ -23,11 +23,11 @@ jobs:
             gcc64
             gcc32
             ~/.ccache
-          key: ${{ runner.os }}-kernel-ccache-${{ hashFiles('**/nx616j.config') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-kernel-ccache-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-
 
-      - name: 准备工具链 (仅在无缓存时下载)
+      - name: 准备工具链
         run: |
           if [ ! -d "clang-aosp" ]; then
             mkdir -p clang-aosp gcc64 gcc32
@@ -52,7 +52,7 @@ jobs:
             curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
           fi
 
-      - name: 执行 Non-GKI 必要修补 (自动探测路径)
+      - name: 执行 Non-GKI 必要修补
         run: |
           cd android-kernel
           # 1. 导出 sys_call_table
@@ -60,9 +60,9 @@ jobs:
             echo '#include <linux/syscalls.h>' >> arch/arm64/kernel/sys.c
             echo 'EXPORT_SYMBOL(sys_call_table);' >> arch/arm64/kernel/sys.c
           fi
-          # 2. 注入 syscall_fn_t
+          # 2. 注入类型定义
           sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h || true
-          # 3. 修复 patch_memory.c (p4d 降级)
+          # 3. 修复 patch_memory.c
           PATCH_MEM=$(find drivers -name "patch_memory.c")
           if [ -n "$PATCH_MEM" ]; then
             sed -i 's/p4d_t \*p4d;//g' "$PATCH_MEM"
@@ -71,7 +71,7 @@ jobs:
             sed -i 's/pud = pud_offset(p4d, addr);/pud = pud_offset(pgd, addr);/g' "$PATCH_MEM"
             sed -i 's/__flush_icache_range/flush_icache_range/g' "$PATCH_MEM"
           fi
-          # 4. 禁用 pkg_observer
+          # 4. 禁用不兼容模块
           KSU_MAKEFILES=$(find drivers -name "Makefile" | xargs grep -l "pkg_observer.o" || true)
           if [ -n "$KSU_MAKEFILES" ]; then
             for f in $KSU_MAKEFILES; do
@@ -80,7 +80,7 @@ jobs:
             done
           fi
 
-      - name: 编译内核 (ccache 提速模式)
+      - name: 编译内核 (强制重新构建)
         run: |
           cd android-kernel
           export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
@@ -90,25 +90,34 @@ jobs:
           # 设置 ccache
           export USE_CCACHE=1
           export CCACHE_DIR=~/.ccache
-          ccache -M 5G # 限制缓存大小为 5G
+          ccache -M 5G
           
-          # 在 CC 参数中注入 ccache
+          # 彻底清除旧的 out 目录，确保不被旧时间戳误导
+          rm -rf out
+          mkdir -p out
+          
+          # 定义编译参数
+          # 注意：CC 参数使用了 ccache 包装
           MAKE_ARGS="ARCH=arm64 O=out CC='ccache clang' CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
           
-          # 配置生成
+          # 1. 生成配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
           
-          # 强制开启 SukiSU 配置
+          # 2. 注入 KSU 配置
           ./scripts/config --file out/.config -e KSU
           ./scripts/config --file out/.config -e KSU_SUCOMPAT
           ./scripts/config --file out/.config -d KSU_PACKAGE_OBSERVER
+          
+          # 3. 强制刷新并校验配置
           make $MAKE_ARGS olddefconfig
-
-          # 正式编译
+          echo "--- KSU CONFIG CHECK ---"
+          grep "CONFIG_KSU" out/.config
+          
+          # 4. 真正开始编译 (明确目标 Image.gz-dtb)
+          # 使用 -j$(nproc) 加快速度
           make -j$(nproc --all) $MAKE_ARGS Image.gz-dtb
           
-          # 显示 ccache 命中率（方便调试查看）
           ccache -s
 
       - name: 打包产物
@@ -123,5 +132,5 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-ccache-Kernel
+          name: SukiSU-Ultra-Final-Build
           path: android-kernel/out/arch/arm64/boot/*.zip
