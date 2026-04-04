@@ -32,11 +32,12 @@ jobs:
       - name: Download Toolchains
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
-          # Download Clang
+          # 下载 AOSP Clang
           mkdir clang-aosp
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-${{ env.CLANG_VERSION }}.tar.gz
           tar -C clang-aosp/ -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
-          # Download GCC 64 & 32 (Helper for Non-GKI)
+          
+          # 下载 GCC 64 & 32 (Non-GKI 辅助编译链)
           mkdir gcc64 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64 -zxf gcc64.tar.gz
           mkdir gcc32 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
@@ -50,36 +51,42 @@ jobs:
       - name: Integrated ReSukiSU (Manual Mount)
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 1. 克隆 ReSukiSU 驱动
-          git clone https://github.com/ReSukiSU/ReSukiSU.git drivers/resukisu
+          # 1. 克隆 ReSukiSU 源码
+          git clone https://github.com/ReSukiSU/ReSukiSU.git resukisu_tmp
           
-          # 2. 验证文件是否存在，防止编译中断
+          # 2. 提取 src 目录到 drivers/resukisu (这是关键，解决文件找不到的问题)
+          mkdir -p drivers/resukisu
+          cp -r resukisu_tmp/src/* drivers/resukisu/
+          rm -rf resukisu_tmp
+          
+          # 3. 验证文件路径
           if [ ! -f "drivers/resukisu/Kconfig" ]; then
-            echo "::error::ReSukiSU Kconfig missing!"
+            echo "::error::ReSukiSU Kconfig Still Missing!"
+            ls -R drivers/resukisu
             exit 1
           fi
 
-          # 3. 注入到内核 Kconfig (必须在最后一个 endmenu 之前插入)
-          # 使用 sed 在 drivers/Kconfig 的最后一行 endmenu 之前插入 source 语句
+          # 4. 注入到内核驱动菜单 (插入到 drivers/Kconfig 的 endmenu 之前)
           sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
           
-          # 4. 注入到内核 Makefile
+          # 5. 注入到内核 Makefile
           echo 'obj-y += resukisu/' >> drivers/Makefile
 
       - name: Merge defconfig & Enable ReSukiSU
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 合并 Nubia 设备的原始配置
+          # 合并 Nubia 设备专用配置
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
           
-          # 追加 ReSukiSU 必需的内核选项 (依照官方文档)
+          # 开启 ReSukiSU 必需的内核选项
           {
             echo "CONFIG_RESUKISU=y"
             echo "CONFIG_KPROBES=y"
             echo "CONFIG_HAVE_KPROBES=y"
             echo "CONFIG_KPROBE_EVENTS=y"
+            echo "CONFIG_STRICT_MODULE_RWX=n"
           } >> arch/arm64/configs/lineage_nx616j_defconfig
 
       - name: Build kernel
@@ -92,7 +99,7 @@ jobs:
           GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-          # 生成 .config
+          # 生成最终 .config
           make -j$(nproc) O=out \
             ARCH=arm64 \
             CC=clang \
@@ -102,7 +109,7 @@ jobs:
             LD=ld.lld LLVM=1 LLVM_IAS=1 \
             lineage_nx616j_defconfig
 
-          # 正式执行编译
+          # 执行编译
           make -j$(nproc) O=out \
             ARCH=arm64 \
             CC=clang \
