@@ -5,18 +5,10 @@ on:
 
 jobs:
   build:
-    name: Build Kernel by ${{ github.actor }}
+    name: Build Kernel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Configuration
-        run: |
-          echo "KERNEL_SOURCE=https://github.com/LineageOS/android_kernel_nubia_sdm845" >> $GITHUB_ENV
-          echo "KERNEL_SOURCE_BRANCH=lineage-22.2" >> $GITHUB_ENV
-          echo "CLANG_VERSION=r487747c" >> $GITHUB_ENV
-          echo "DEVICE=nx616j" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
@@ -26,93 +18,67 @@ jobs:
             libssl-dev bc libc6-dev-i386 libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip \
             device-tree-compiler python3 libncurses-dev libncurses5-dev
 
-      - name: Prepare workspace
-        run: mkdir -p $GITHUB_WORKSPACE/kernel_workspace
-
-      - name: Download Toolchains
+      - name: Build Kernel Process
         run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          mkdir clang-aosp
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-${{ env.CLANG_VERSION }}.tar.gz
-          tar -C clang-aosp/ -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
-          mkdir gcc64 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
-          tar -C gcc64 -zxf gcc64.tar.gz
-          mkdir gcc32 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
-          tar -C gcc32 -zxf gcc32.tar.gz
+          # 1. 准备目录
+          mkdir -p $GITHUB_WORKSPACE/kernel_workspace && cd $GITHUB_WORKSPACE/kernel_workspace
 
-      - name: Clone kernel source
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth 1
+          # 2. 下载并解压工具链 (AOSP Clang r487747c + GCC 4.9)
+          mkdir -p clang-aosp gcc64 gcc32
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-r487747c.tar.gz" | tar -C clang-aosp -zxf -
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" | tar -C gcc64 -zxf -
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" | tar -C gcc32 -zxf -
 
-      - name: Integrated ReSukiSU & 4.9 Kernel Patches
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 1. 克隆 ReSukiSU 并提取源码到驱动目录
+          # 3. 克隆内核源码
+          git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 android-kernel --depth 1
+          cd android-kernel
+          
+          # 4. 集成 ReSukiSU 驱动
           git clone https://github.com/ReSukiSU/ReSukiSU.git resukisu_tmp
           mkdir -p drivers/resukisu
           cp -r resukisu_tmp/kernel/* drivers/resukisu/
           [ -d "resukisu_tmp/uapi" ] && cp -r resukisu_tmp/uapi/* include/uapi/
           rm -rf resukisu_tmp
+
+          # 5. 应用 4.9 内核深度补丁
+          # 5.1 绕过 Kbuild 检查 & 修复 4.9 seccomp 路径
+          sed -i 's/$(error/$(info/g' drivers/resukisu/Kbuild
+          sed -i 's/seccomp_types.h/seccomp.h/g' drivers/resukisu/Kbuild
           
-          # 2. 修改 Kbuild：绕过子模块检查 & 修复 4.9 seccomp 路径
-          cd drivers/resukisu
-          sed -i 's/$(error/$(info/g' Kbuild
-          sed -i 's/seccomp_types.h/seccomp.h/g' Kbuild
+          # 5.2 强制切换到 KPROBE 模式 (4.9 Non-GKI 必须关闭 TP_HOOK)
+          sed -i 's/CONFIG_RE_SU_KSU_TP_HOOK=y/CONFIG_RE_SU_KSU_TP_HOOK=n/g' drivers/resukisu/Kbuild || true
+          echo "ccflags-y += -DCONFIG_RE_SUK_SU_KPROBE_HOOK" >> drivers/resukisu/Kbuild
+
+          # 5.3 修复 syscall_fn_t：必须返回 long 而非 void (解决 ret = ... 报错)
+          sed -i '1i #include <linux/types.h>\ntypedef long (*syscall_fn_t)(void);' drivers/resukisu/hook/syscall_hook.h
           
-          # 3. 强制降级模式：关闭 TP_HOOK (Non-GKI 不支持)，开启 KPROBE_HOOK
-          sed -i 's/CONFIG_RE_SU_KSU_TP_HOOK=y/CONFIG_RE_SU_KSU_TP_HOOK=n/g' Kbuild || true
-          echo "ccflags-y += -DCONFIG_RE_SUK_SU_KPROBE_HOOK" >> Kbuild
-          
-          # 4. 类型定义补丁：修复 syscall_fn_t 未定义
-          sed -i '1i #include <linux/types.h>\ntypedef void (*syscall_fn_t)(void);' hook/syscall_hook.h
-          
-          # 5. 语法补丁：修复 sucompat.c 4.9 内核参数调用错误
-          sed -i 's/ksu_syscall_table\[orig_nr\](regs)/ksu_syscall_table[orig_nr]()/g' feature/sucompat.c
-          
-          # 6. 注入到内核主 Makefile 和 Kconfig
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+          # 5.4 修复 sucompat.c：移除 regs 参数调用 (解决 too many arguments 报错)
+          sed -i 's/ksu_syscall_table\[orig_nr\](regs)/ksu_syscall_table[orig_nr]()/g' drivers/resukisu/feature/sucompat.c
+
+          # 5.5 注入到内核构建系统
           sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
           echo 'obj-y += resukisu/' >> drivers/Makefile
 
-      - name: Merge defconfig & Force Enable KPROBES
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 合并 Nubia 845 基础配置
+          # 6. 配置 Defconfig (强制开启 KPROBES 核心开关)
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
           
-          # 强制开启 Kprobes 核心配置
-          {
-            echo "CONFIG_RESUKISU=y"
-            echo "CONFIG_KPROBES=y"
-            echo "CONFIG_HAVE_KPROBES=y"
-            echo "CONFIG_KPROBE_EVENTS=y"
-            echo "CONFIG_KALLSYMS=y"
-            echo "CONFIG_KALLSYMS_ALL=y"
-            echo "CONFIG_STRICT_MODULE_RWX=n"
-          } >> arch/arm64/configs/lineage_nx616j_defconfig
+          printf "CONFIG_RESUKISU=y\nCONFIG_KPROBES=y\nCONFIG_HAVE_KPROBES=y\nCONFIG_KPROBE_EVENTS=y\nCONFIG_KALLSYMS=y\nCONFIG_KALLSYMS_ALL=y\nCONFIG_STRICT_MODULE_RWX=n\n" >> arch/arm64/configs/lineage_nx616j_defconfig
 
-      - name: Build kernel
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-          export KBUILD_BUILD_HOST=GitHub-Action
-          export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-          GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
-          GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
-
-          # 生成 .config
-          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 lineage_nx616j_defconfig
+          # 7. 执行编译
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
           
-          # 正式编译
-          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1
+          # 生成 .config
+          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi- LD=ld.lld LLVM=1 LLVM_IAS=1 lineage_nx616j_defconfig
+          
+          # 编译内核
+          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi- LD=ld.lld LLVM=1 LLVM_IAS=1
 
-      - name: Upload kernel
+      - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ReSukiSU-Kernel-nx616j-${{ env.BUILD_TIME }}
+          name: ReSukiSU-Kernel-nx616j
           path: |
             kernel_workspace/android-kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img
