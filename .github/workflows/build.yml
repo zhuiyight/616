@@ -1,4 +1,4 @@
-name: Build Kernel SDM845 with SukiSU-Ultra (Final-Fix)
+name: Build Kernel SDM845 with SukiSU-Ultra (ccache-Enabled)
 on:
   workflow_dispatch:
 
@@ -13,56 +13,65 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git automake flex lzop bison build-essential zip curl \
-            bc libssl-dev device-tree-compiler python3 libncurses-dev
+            bc libssl-dev device-tree-compiler python3 libncurses-dev ccache
 
-      - name: 准备工具链 (Clang r536225 + GCC 4.9)
-        run: |
-          cd $GITHUB_WORKSPACE
-          mkdir -p clang-aosp gcc64 gcc32
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz
-          tar -C clang-aosp/ -zxf clang-r536225.tar.gz
-          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
-          tar -C gcc64/ -zxf gcc64.tar.gz
-          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
-          tar -C gcc32/ -zxf gcc32.tar.gz
+      - name: 缓存管理 (工具链与 ccache 数据)
+        uses: actions/cache@v4
+        with:
+          path: |
+            clang-aosp
+            gcc64
+            gcc32
+            ~/.ccache
+          key: ${{ runner.os }}-kernel-ccache-${{ hashFiles('**/nx616j.config') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-
 
-      - name: 同步内核源码 (Lineage-22.2)
+      - name: 准备工具链 (仅在无缓存时下载)
         run: |
-          git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 android-kernel --depth 1
+          if [ ! -d "clang-aosp" ]; then
+            mkdir -p clang-aosp gcc64 gcc32
+            wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz
+            tar -C clang-aosp/ -zxf clang-r536225.tar.gz
+            wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
+            tar -C gcc64/ -zxf gcc64.tar.gz
+            wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
+            tar -C gcc32/ -zxf gcc32.tar.gz
+          fi
+
+      - name: 同步内核源码
+        run: |
+          if [ ! -d "android-kernel" ]; then
+            git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 android-kernel --depth 1
+          fi
 
       - name: 集成 SukiSU-Ultra 驱动
         run: |
           cd android-kernel
-          # 使用 SukiSU-Ultra 官方集成脚本
-          curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
+          if [ ! -d "drivers/kernelsu" ] && [ ! -d "ksu" ]; then
+            curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
+          fi
 
       - name: 执行 Non-GKI 必要修补 (自动探测路径)
         run: |
           cd android-kernel
-          
           # 1. 导出 sys_call_table
           if ! grep -q "EXPORT_SYMBOL(sys_call_table)" arch/arm64/kernel/sys.c; then
             echo '#include <linux/syscalls.h>' >> arch/arm64/kernel/sys.c
             echo 'EXPORT_SYMBOL(sys_call_table);' >> arch/arm64/kernel/sys.c
           fi
-
-          # 2. 注入 syscall_fn_t 类型定义
-          if ! grep -q "typedef.*syscall_fn_t" include/linux/syscalls.h; then
-            sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h
-          fi
-
-          # 3. 【自动定位】修复 patch_memory.c (解决 4.9 内核不支持 p4d 的问题)
+          # 2. 注入 syscall_fn_t
+          sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h || true
+          # 3. 修复 patch_memory.c (p4d 降级)
           PATCH_MEM=$(find drivers -name "patch_memory.c")
           if [ -n "$PATCH_MEM" ]; then
-            echo "修补内存文件: $PATCH_MEM"
             sed -i 's/p4d_t \*p4d;//g' "$PATCH_MEM"
             sed -i 's/p4d = p4d_offset(pgd, addr);//g' "$PATCH_MEM"
             sed -i 's/if (p4d_none(\*p4d) || p4d_bad(\*p4d))/if (0)/g' "$PATCH_MEM"
             sed -i 's/pud = pud_offset(p4d, addr);/pud = pud_offset(pgd, addr);/g' "$PATCH_MEM"
             sed -i 's/__flush_icache_range/flush_icache_range/g' "$PATCH_MEM"
           fi
-
-          # 4. 【自动定位】禁用 pkg_observer (解决 fsnotify 兼容性)
+          # 4. 禁用 pkg_observer
           KSU_MAKEFILES=$(find drivers -name "Makefile" | xargs grep -l "pkg_observer.o" || true)
           if [ -n "$KSU_MAKEFILES" ]; then
             for f in $KSU_MAKEFILES; do
@@ -71,43 +80,36 @@ jobs:
             done
           fi
 
-          # 5. 【自动定位】适配 4.9 头文件 (解决 tp_marker 报错)
-          TP_MARKER=$(find drivers -name "tp_marker.c")
-          if [ -n "$TP_MARKER" ]; then
-            sed -i 's/#include <linux\/sched\/signal.h>/#include <linux\/sched.h>/g' "$TP_MARKER"
-            sed -i 's/#include <linux\/sched\/task.h>/#include <linux\/sched.h>/g' "$TP_MARKER"
-          fi
-
-      - name: 编译内核 (SDM845/4.9/Non-GKI)
+      - name: 编译内核 (ccache 提速模式)
         run: |
           cd android-kernel
           export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
           GCC64=$GITHUB_WORKSPACE/gcc64/bin/aarch64-linux-android-
           GCC32=$GITHUB_WORKSPACE/gcc32/bin/arm-linux-androideabi-
           
-          # 定义编译环境变量
-          MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
+          # 设置 ccache
+          export USE_CCACHE=1
+          export CCACHE_DIR=~/.ccache
+          ccache -M 5G # 限制缓存大小为 5G
           
-          # 1. 清理旧配置残留
-          rm -rf out
-          mkdir -p out
-
-          # 2. 生成基础配置 (Nubia SDM845)
+          # 在 CC 参数中注入 ccache
+          MAKE_ARGS="ARCH=arm64 O=out CC='ccache clang' CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
+          
+          # 配置生成
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
-          
-          # 3. 合并设备特定配置 (NX616J)
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
           
-          # 4. 强制注入 SukiSU-Ultra 核心选项
+          # 强制开启 SukiSU 配置
           ./scripts/config --file out/.config -e KSU
           ./scripts/config --file out/.config -e KSU_SUCOMPAT
           ./scripts/config --file out/.config -d KSU_PACKAGE_OBSERVER
-          
-          # 5. 【关键】同步配置，防止 make 忽略新选项
           make $MAKE_ARGS olddefconfig
-          
-          # 6. 正式全速编译 (明确指定目标 Image.gz-dtb)
+
+          # 正式编译
           make -j$(nproc --all) $MAKE_ARGS Image.gz-dtb
+          
+          # 显示 ccache 命中率（方便调试查看）
+          ccache -s
 
       - name: 打包产物
         run: |
@@ -121,5 +123,5 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-NX616J
+          name: SukiSU-Ultra-ccache-Kernel
           path: android-kernel/out/arch/arm64/boot/*.zip
