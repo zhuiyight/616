@@ -14,7 +14,6 @@ jobs:
         run: |
           echo "KERNEL_SOURCE=https://github.com/LineageOS/android_kernel_nubia_sdm845" >> $GITHUB_ENV
           echo "KERNEL_SOURCE_BRANCH=lineage-22.2" >> $GITHUB_ENV
-          echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
           echo "CLANG_VERSION=r487747c" >> $GITHUB_ENV
           echo "DEVICE=nx616j" >> $GITHUB_ENV
           echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
@@ -30,22 +29,17 @@ jobs:
       - name: Prepare workspace
         run: mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-      - name: Download Clang
+      - name: Download Toolchains
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
+          # Download Clang
           mkdir clang-aosp
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-${{ env.CLANG_VERSION }}.tar.gz
           tar -C clang-aosp/ -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
-
-      - name: Download GCC 64 & 32
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          mkdir gcc64
-          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
+          # Download GCC 64 & 32 (Helper for Non-GKI)
+          mkdir gcc64 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64 -zxf gcc64.tar.gz
-
-          mkdir gcc32
-          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
+          mkdir gcc32 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
           tar -C gcc32 -zxf gcc32.tar.gz
 
       - name: Clone kernel source
@@ -53,34 +47,39 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth 1
 
-      - name: Integrated ReSukiSU
+      - name: Integrated ReSukiSU (Manual Mount)
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 克隆 ReSukiSU 驱动到驱动目录
+          # 1. 克隆 ReSukiSU 驱动
           git clone https://github.com/ReSukiSU/ReSukiSU.git drivers/resukisu
           
-          # 修改内核构建脚本以包含新驱动
-          # 在 drivers/Kconfig 末尾添加 source
-          sed -i '$a source "drivers/resukisu/Kconfig"' drivers/Kconfig
-          # 在 drivers/Makefile 末尾添加 obj-y
+          # 2. 验证文件是否存在，防止编译中断
+          if [ ! -f "drivers/resukisu/Kconfig" ]; then
+            echo "::error::ReSukiSU Kconfig missing!"
+            exit 1
+          fi
+
+          # 3. 注入到内核 Kconfig (必须在最后一个 endmenu 之前插入)
+          # 使用 sed 在 drivers/Kconfig 的最后一行 endmenu 之前插入 source 语句
+          sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
+          
+          # 4. 注入到内核 Makefile
           echo 'obj-y += resukisu/' >> drivers/Makefile
 
-      - name: Merge defconfig & Patch ReSukiSU Configs
+      - name: Merge defconfig & Enable ReSukiSU
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 合并原始配置
+          # 合并 Nubia 设备的原始配置
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
           
-          # 注入 ReSukiSU 必需的内核参数
+          # 追加 ReSukiSU 必需的内核选项 (依照官方文档)
           {
             echo "CONFIG_RESUKISU=y"
             echo "CONFIG_KPROBES=y"
             echo "CONFIG_HAVE_KPROBES=y"
             echo "CONFIG_KPROBE_EVENTS=y"
-            echo "CONFIG_MODULE_SIG=n"
-            echo "CONFIG_STRICT_MODULE_RWX=n"
           } >> arch/arm64/configs/lineage_nx616j_defconfig
 
       - name: Build kernel
@@ -89,11 +88,11 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-
+          
           GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-          # 生成最终 .config
+          # 生成 .config
           make -j$(nproc) O=out \
             ARCH=arm64 \
             CC=clang \
