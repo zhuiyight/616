@@ -23,11 +23,19 @@ jobs:
       - name: 下载工具链 (Clang & GCC)
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
-          mkdir -p clang-aosp gcc64 gcc32
+          
+          # 下载并解压 Clang r536225
+          mkdir -p clang-aosp
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz
           tar -C clang-aosp/ -zxf clang-r536225.tar.gz
+          
+          # 下载并解压 GCC 64 (4.9)
+          mkdir -p gcc64
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64/ -zxf gcc64.tar.gz
+          
+          # 下载并解压 GCC 32 (4.9)
+          mkdir -p gcc32
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
           tar -C gcc32/ -zxf gcc32.tar.gz
 
@@ -44,28 +52,58 @@ jobs:
       - name: 修复 ReSukiSU 兼容性
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
-          sed -i '1i#include <linux/ptrace.h>\n#ifndef syscall_fn_t\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif' drivers/kernelsu/hook/syscall_hook.h
+          
+          # 1. 绕过 Non-GKI 检查（将 error 降级为 warning）
+          if [ -f drivers/kernelsu/Kbuild ]; then
+            sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
+          fi
+          
+          # 2. 注入正确的函数指针定义，修复 sucompat.c 调用报错
+          # 增加 const 限定符以匹配内核 4.9 的参数类型
+          if [ -f drivers/kernelsu/hook/syscall_hook.h ]; then
+            sed -i '/typedef long (\*syscall_fn_t)/d' drivers/kernelsu/hook/syscall_hook.h
+            sed -i '1i#include <linux/ptrace.h>\n#ifndef syscall_fn_t\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif' drivers/kernelsu/hook/syscall_hook.h
+          fi
+
+          # 3. 禁用不兼容 4.9 内核的 pkg_observer 模块
+          # 该模块依赖的高版本 fsnotify 接口在 4.9 中不存在
+          if [ -f drivers/kernelsu/manager/Makefile ]; then
+            sed -i 's/obj-y += pkg_observer.o/# obj-y += pkg_observer.o/g' drivers/kernelsu/manager/Makefile
+          fi
 
       - name: 编译内核
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+          
+          # 路径设置
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=${{ github.actor }}
+
           GCC64_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
+
+          # 编译参数
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH CROSS_COMPILE_ARM32=$GCC32_PATH LD=ld.lld LLVM=1 LLVM_IAS=1"
+
+          # 1. 生成基础配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
+          
+          # 2. 合并设备特定配置 (NX616J)
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
+
+          # 3. 正式编译
           make -j$(nproc --all) $MAKE_ARGS
 
       - name: 打包产物
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/
-          if [ -f Image.gz-dtb ]; then zip -j kernel-nx616j-resukisu.zip Image.gz-dtb
-          elif [ -f Image.gz ]; then zip -j kernel-nx616j-resukisu.zip Image.gz
-          elif [ -f Image ]; then zip -j kernel-nx616j-resukisu.zip Image
+          if [ -f Image.gz-dtb ]; then
+            zip -j kernel-nx616j-resukisu.zip Image.gz-dtb
+          elif [ -f Image.gz ]; then
+            zip -j kernel-nx616j-resukisu.zip Image.gz
+          elif [ -f Image ]; then
+            zip -j kernel-nx616j-resukisu.zip Image
           fi
 
       - name: 上传内核
