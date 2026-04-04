@@ -1,4 +1,4 @@
-name: Build Kernel SDM845 with ReSukiSU (Final-NonGKI)
+name: Build Kernel SDM845 with ReSukiSU (Ultimate-4.9)
 on:
   workflow_dispatch:
 
@@ -23,11 +23,11 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           mkdir -p clang-aosp gcc64 gcc32
           
-          # 下载 Clang
+          # 下载 Clang r536225
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz
           tar -C clang-aosp/ -zxf clang-r536225.tar.gz
           
-          # 下载 GCC 64/32 (用于兼容老内核汇编)
+          # 下载 GCC 64/32 (4.9 用于兼容非 GKI 汇编)
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64/ -zxf gcc64.tar.gz
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
@@ -43,7 +43,7 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
 
-      - name: 执行核心修补 (Non-GKI 4.9 适配)
+      - name: 执行核心修补 (Non-GKI 4.9 深度适配)
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           
@@ -52,39 +52,42 @@ jobs:
             echo 'EXPORT_SYMBOL(sys_call_table);' >> arch/arm64/kernel/sys.c
           fi
 
-          # 2. 定义 syscall_fn_t 类型 (解决核心定义缺失)
-          # 在内核全局头文件中注入，确保所有模块可见
+          # 2. 内核全局定义 syscall_fn_t (解决定义缺失)
           sed -i '/asmlinkage long sys_ni_syscall(void);/a \
           typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h
 
-          # 3. 驱动头文件暴力修补 (解决 syscall_hook.h 报错)
+          # 3. 驱动头文件修补 (带宏保护，消除重定义警告)
           HOOK_H="drivers/kernelsu/hook/syscall_hook.h"
           if [ -f "$HOOK_H" ]; then
-            # 先清除旧定义，防止重复定义报错
             sed -i '/typedef.*syscall_fn_t/d' "$HOOK_H"
-            # 注入完整的头文件引用和本地定义
-            sed -i '1i#include <linux/syscalls.h>\n#include <linux/ptrace.h>\n#ifndef syscall_fn_t\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif' "$HOOK_H"
+            sed -i '1i#include <linux/syscalls.h>\n#include <linux/ptrace.h>\n#ifndef syscall_fn_t_defined\n#define syscall_fn_t_defined\ntypedef long (*syscall_fn_t)(const struct pt_regs *);\n#endif' "$HOOK_H"
           fi
 
-          # 4. 绕过 Kbuild GKI 限制 (解除 Tracepoint 锁定)
+          # 4. 绕过 Kbuild 限制 (允许非 GKI 使用 TP Hooks)
           if [ -f drivers/kernelsu/Kbuild ]; then
             sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
           fi
 
-          # 5. 【彻底解决 fsnotify 报错】空文件覆盖法
-          # 既然 4.9 的 fsnotify 接口无法修补，我们让编译器处理一个空文件
+          # 5. 解决 pkg_observer 报错 (空文件覆盖法，避开 fsnotify 兼容性死坑)
           PKG_OBS="drivers/kernelsu/manager/pkg_observer.c"
           if [ -f "$PKG_OBS" ]; then
-            echo "// Compatible for 4.9 Kernel: Module Content Cleared to avoid fsnotify mismatch" > "$PKG_OBS"
+            echo "// Compatible for 4.9 Kernel" > "$PKG_OBS"
             echo "void ksu_pkg_observer_exit(void) {}" >> "$PKG_OBS"
             echo "int ksu_pkg_observer_init(void) { return 0; }" >> "$PKG_OBS"
+          fi
+
+          # 6. 解决 tp_marker.c 头文件缺失报错 (4.9 内核适配)
+          # 4.11 以下内核没有 linux/sched/signal.h
+          TP_MARKER="drivers/kernelsu/hook/tp_marker.c"
+          if [ -f "$TP_MARKER" ]; then
+            sed -i 's/#include <linux\/sched\/signal.h>/#include <linux\/sched.h>/g' "$TP_MARKER"
           fi
 
       - name: 编译内核
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           
-          # 路径与环境变量
+          # 设置环境变量
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=${{ github.actor }}
@@ -92,14 +95,16 @@ jobs:
           GCC64_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-          # 核心编译参数 (加入 -Wno-error 以防止细微警告中断编译)
+          # 核心编译参数 (加入 -Wno-error 确保编译不被非致命警告中断)
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH CROSS_COMPILE_ARM32=$GCC32_PATH LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
 
-          # 生成配置
+          # 1. 生成基础配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
+          
+          # 2. 合并设备特定配置 (NX616J)
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
 
-          # 正式编译
+          # 3. 正式编译
           make -j$(nproc --all) $MAKE_ARGS
 
       - name: 打包产物
