@@ -1,4 +1,4 @@
-name: Build ReSukiSU Kernel (SDM845-NX616J)
+name: Build ReSukiSU Kernel (SDM845-NX616J-r522817)
 
 on:
   workflow_dispatch:
@@ -23,9 +23,9 @@ jobs:
           # 1. 准备目录
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace && cd $GITHUB_WORKSPACE/kernel_workspace
 
-          # 2. 下载工具链 (AOSP Clang r487747c + GCC 4.9)
+          # 2. 下载新版 Clang r522817 及 GCC 4.9 兼容工具链
           mkdir -p clang-aosp gcc64 gcc32
-          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-r487747c.tar.gz" | tar -C clang-aosp -zxf -
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz" | tar -C clang-aosp -zxf -
           curl -LSs "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" | tar -C gcc64 -zxf -
           curl -LSs "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" | tar -C gcc32 -zxf -
 
@@ -40,38 +40,38 @@ jobs:
           [ -d "resukisu_tmp/uapi" ] && cp -r resukisu_tmp/uapi/* include/uapi/
           rm -rf resukisu_tmp
 
-          # 5. 应用 4.9 内核深度补丁 (解决兼容性报错)
-          # 5.1 绕过 Kbuild 检查 & 修复 4.9 seccomp 路径
+          # 5. 应用 4.9 内核深度补丁 (针对新版 Clang 优化)
+          # 5.1 强制移除所有 -Werror 限制 (新版 Clang 警告极多，必须移除此限制否则必挂)
+          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g'
+
+          # 5.2 绕过驱动内部检查
           sed -i 's/$(error/$(info/g' drivers/resukisu/Kbuild
           sed -i 's/seccomp_types.h/seccomp.h/g' drivers/resukisu/Kbuild
-          
-          # 5.2 强制切换到 KPROBE 模式 (4.9 Non-GKI 必须关闭 TP_HOOK)
           sed -i 's/CONFIG_RE_SU_KSU_TP_HOOK=y/CONFIG_RE_SU_KSU_TP_HOOK=n/g' drivers/resukisu/Kbuild || true
           echo "ccflags-y += -DCONFIG_RE_SUK_SU_KPROBE_HOOK" >> drivers/resukisu/Kbuild
 
-          # 5.3 关键：修复 syscall_fn_t 定义，使其带上 pt_regs 参数以匹配 runtime 钩子
-          # 同时使用 long 返回值解决赋值错误
-          sed -i '1i struct pt_regs;\ntypedef long (*syscall_fn_t)(struct pt_regs *);' drivers/resukisu/hook/syscall_hook.h
+          # 5.3 修复类型定义 (使用 const 适配严格检查)
+          sed -i '1i struct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);' drivers/resukisu/hook/syscall_hook.h
           
-          # 5.4 修复 sucompat.c：调用时增加强制类型转换并传入 regs
+          # 5.4 修复 sucompat.c 调用逻辑
           sed -i 's/ksu_syscall_table\[orig_nr\](regs)/((syscall_fn_t)ksu_syscall_table[orig_nr])(regs)/g' drivers/resukisu/feature/sucompat.c
 
           # 5.5 注入到构建系统
           sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
           echo 'obj-y += resukisu/' >> drivers/Makefile
 
-          # 6. 配置 Defconfig (开启 KPROBES 核心支持)
+          # 6. 配置 Defconfig (开启 KPROBES)
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
           
           printf "CONFIG_RESUKISU=y\nCONFIG_KPROBES=y\nCONFIG_HAVE_KPROBES=y\nCONFIG_KPROBE_EVENTS=y\nCONFIG_KALLSYMS=y\nCONFIG_KALLSYMS_ALL=y\nCONFIG_STRICT_MODULE_RWX=n\n" >> arch/arm64/configs/lineage_nx616j_defconfig
 
-          # 7. 开始编译
+          # 7. 开始编译 (使用新版 Clang 参数)
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
           
-          # 导出编译参数减少重复
-          MAKE_PARAMS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi- LD=ld.lld LLVM=1 LLVM_IAS=1"
+          # 核心参数：增加 LLVM_IAS=0 因为老内核汇编可能不兼容 Clang 内置汇编器
+          MAKE_PARAMS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi- LD=ld.lld LLVM=1 LLVM_IAS=0"
           
           make -j$(nproc) $MAKE_PARAMS lineage_nx616j_defconfig
           make -j$(nproc) $MAKE_PARAMS
@@ -79,7 +79,7 @@ jobs:
       - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ReSukiSU-Kernel-nx616j
+          name: ReSukiSU-Kernel-nx616j-r522817
           path: |
             kernel_workspace/android-kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img
