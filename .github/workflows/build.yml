@@ -45,31 +45,32 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth 1
 
-      - name: Integrated ReSukiSU & Patch Compatibility
+      - name: Integrated ReSukiSU & 4.9 Kernel Patches
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+          # 1. 克隆 ReSukiSU 并提取源码到驱动目录
           git clone https://github.com/ReSukiSU/ReSukiSU.git resukisu_tmp
           mkdir -p drivers/resukisu
           cp -r resukisu_tmp/kernel/* drivers/resukisu/
           [ -d "resukisu_tmp/uapi" ] && cp -r resukisu_tmp/uapi/* include/uapi/
           rm -rf resukisu_tmp
           
+          # 2. 修改 Kbuild：绕过子模块检查 & 修复 4.9 seccomp 路径
           cd drivers/resukisu
-          # 1. 暴力绕过所有 Kbuild 的 error 检查
           sed -i 's/$(error/$(info/g' Kbuild
-          
-          # 2. 修复 4.9 内核缺少的 seccomp_types.h 路径
           sed -i 's/seccomp_types.h/seccomp.h/g' Kbuild
           
-          # 3. 强制关闭 TP_HOOK 并启用 KPROBE_HOOK (4.9 内核的核心适配)
-          # 这样可以解决 "TP hooks are incompatible with Non-GKI" 的问题
-          sed -i 's/CONFIG_RE_SUK_SU_TP_HOOK=y/CONFIG_RE_SUK_SU_TP_HOOK=n/g' Kbuild || true
+          # 3. 强制降级模式：关闭 TP_HOOK (Non-GKI 不支持)，开启 KPROBE_HOOK
+          sed -i 's/CONFIG_RE_SU_KSU_TP_HOOK=y/CONFIG_RE_SU_KSU_TP_HOOK=n/g' Kbuild || true
           echo "ccflags-y += -DCONFIG_RE_SUK_SU_KPROBE_HOOK" >> Kbuild
           
-          # 4. 修复 syscall_fn_t 未定义错误
+          # 4. 类型定义补丁：修复 syscall_fn_t 未定义
           sed -i '1i #include <linux/types.h>\ntypedef void (*syscall_fn_t)(void);' hook/syscall_hook.h
           
-          # 5. 注入系统
+          # 5. 语法补丁：修复 sucompat.c 4.9 内核参数调用错误
+          sed -i 's/ksu_syscall_table\[orig_nr\](regs)/ksu_syscall_table[orig_nr]()/g' feature/sucompat.c
+          
+          # 6. 注入到内核主 Makefile 和 Kconfig
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
           echo 'obj-y += resukisu/' >> drivers/Makefile
@@ -77,12 +78,12 @@ jobs:
       - name: Merge defconfig & Force Enable KPROBES
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 合并 Nubia 基础配置
+          # 合并 Nubia 845 基础配置
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
           
-          # 强制开启 KPROBES 和符号表支持，这是 Non-GKI 运行 ReSukiSU 的前提
+          # 强制开启 Kprobes 核心配置
           {
             echo "CONFIG_RESUKISU=y"
             echo "CONFIG_KPROBES=y"
@@ -102,7 +103,10 @@ jobs:
           GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
+          # 生成 .config
           make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 lineage_nx616j_defconfig
+          
+          # 正式编译
           make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1
 
       - name: Upload kernel
