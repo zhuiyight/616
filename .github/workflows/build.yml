@@ -1,4 +1,4 @@
-name: Build ReSukiSU Kernel (SDM845-NX616J-Final)
+name: Build ReSukiSU Kernel (SDM845-NX616J-r536225)
 
 on:
   workflow_dispatch:
@@ -23,42 +23,43 @@ jobs:
           # 1. 准备目录
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace && cd $GITHUB_WORKSPACE/kernel_workspace
 
-          # 2. 下载工具链 (Clang r522817 + GCC 4.9)
+          # 2. 下载工具链 (Clang r536225 + GCC 4.9)
           mkdir -p clang-aosp gcc64 gcc32
-          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz" | tar -C clang-aosp -zxf -
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz" | tar -C clang-aosp -zxf -
           curl -LSs "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" | tar -C gcc64 -zxf -
           curl -LSs "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz" | tar -C gcc32 -zxf -
 
-          # 3. 克隆内核源码
+          # 3. 克隆源码
           git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 android-kernel --depth 1
           cd android-kernel
           
-          # 4. 集成 ReSukiSU 驱动
+          # 4. 集成驱动
           git clone https://github.com/ReSukiSU/ReSukiSU.git resukisu_tmp
           mkdir -p drivers/resukisu
           cp -r resukisu_tmp/kernel/* drivers/resukisu/
           [ -d "resukisu_tmp/uapi" ] && cp -r resukisu_tmp/uapi/* include/uapi/
           rm -rf resukisu_tmp
 
-          # 5. 应用深度补丁 (核心修正点)
-          # 5.1 强制移除所有 Makefile 中的 -Werror，防止警告中断编译
+          # 5. 应用深度补丁 (针对 Clang 19+ 极其重要)
+          # 5.1 移除所有导致报错的过时参数和 -Werror
           find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g'
+          # 修复本次报错的 key：将不规范的 -implicit 替换为标准格式，或干脆删掉
+          find . -name "Makefile" | xargs sed -i 's/-implicit-function-declaration//g'
+          find . -name "Makefile" | xargs sed -i 's/-Wno-implicit-function-declaration//g'
 
-          # 5.2 修正 ReSukiSU 驱动与 4.9 内核的语法冲突
+          # 5.2 修正 ReSukiSU 驱动兼容性
           sed -i 's/$(error/$(info/g' drivers/resukisu/Kbuild
           sed -i 's/seccomp_types.h/seccomp.h/g' drivers/resukisu/Kbuild
           sed -i 's/CONFIG_RE_SU_KSU_TP_HOOK=y/CONFIG_RE_SU_KSU_TP_HOOK=n/g' drivers/resukisu/Kbuild || true
           echo "ccflags-y += -DCONFIG_RE_SUK_SU_KPROBE_HOOK" >> drivers/resukisu/Kbuild
-          
-          # 修复函数指针类型 (带上 const) 和 syscall 强制类型转换
           sed -i '1i struct pt_regs;\ntypedef long (*syscall_fn_t)(const struct pt_regs *);' drivers/resukisu/hook/syscall_hook.h
           sed -i 's/ksu_syscall_table\[orig_nr\](regs)/((syscall_fn_t)ksu_syscall_table[orig_nr])(regs)/g' drivers/resukisu/feature/sucompat.c
 
-          # 5.3 注入 Kconfig/Makefile
+          # 5.3 注入构建系统
           sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
           echo 'obj-y += resukisu/' >> drivers/Makefile
 
-          # 6. 配置 Defconfig (解决 Stack Protector 检测失败的关键)
+          # 6. 配置 Defconfig
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
@@ -71,7 +72,6 @@ jobs:
             echo "CONFIG_KALLSYMS=y"
             echo "CONFIG_KALLSYMS_ALL=y"
             echo "CONFIG_STRICT_MODULE_RWX=n"
-            # 解决编译器不支持报错：
             echo "CONFIG_CC_STACKPROTECTOR_NONE=y"
             echo "# CONFIG_CC_STACKPROTECTOR_STRONG is not set"
           } >> arch/arm64/configs/lineage_nx616j_defconfig
@@ -79,8 +79,8 @@ jobs:
           # 7. 开始编译
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
           
-          # LLVM_IAS=0 是关键，让老旧汇编代码走 GCC 汇编器
-          MAKE_PARAMS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi- LD=ld.lld LLVM=1 LLVM_IAS=0"
+          # 特别注意：KCFLAGS 用于强制覆盖一些顽固的编译器报错
+          MAKE_PARAMS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android- CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi- LD=ld.lld LLVM=1 LLVM_IAS=0 KCFLAGS=-Wno-implicit-function-declaration"
           
           make -j$(nproc) $MAKE_PARAMS lineage_nx616j_defconfig
           make -j$(nproc) $MAKE_PARAMS
@@ -88,7 +88,7 @@ jobs:
       - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ReSukiSU-Kernel-nx616j-Final
+          name: ReSukiSU-Kernel-nx616j-r536225
           path: |
             kernel_workspace/android-kernel/out/arch/arm64/boot/Image.gz-dtb
             kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img
