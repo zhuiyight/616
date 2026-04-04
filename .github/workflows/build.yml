@@ -1,4 +1,4 @@
-name: Build Kernel SDM845 with SukiSU-Ultra (Deep-Force-Fix)
+name: Build Kernel SDM845 with SukiSU-Ultra (Final-Fix-v2)
 on:
   workflow_dispatch:
 
@@ -27,7 +27,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-
 
-      - name: 准备工具链
+      - name: 准备工具链 (仅在无缓存时下载)
         run: |
           if [ ! -d "clang-aosp" ]; then
             mkdir -p clang-aosp gcc64 gcc32
@@ -39,7 +39,7 @@ jobs:
             tar -C gcc32/ -zxf gcc32.tar.gz
           fi
 
-      - name: 同步内核源码
+      - name: 同步内核源码 (Lineage-22.2)
         run: |
           if [ ! -d "android-kernel" ]; then
             git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 android-kernel --depth 1
@@ -52,17 +52,30 @@ jobs:
             curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
           fi
 
-      - name: 执行 Non-GKI 必要修补
+      - name: 执行 Non-GKI 必要修补 (深度解决 4.9 报错)
         run: |
           cd android-kernel
-          # 1. 导出 sys_call_table
+          
+          # 1. 导出 sys_call_table (Root 钩子必须)
           if ! grep -q "EXPORT_SYMBOL(sys_call_table)" arch/arm64/kernel/sys.c; then
             echo '#include <linux/syscalls.h>' >> arch/arm64/kernel/sys.c
             echo 'EXPORT_SYMBOL(sys_call_table);' >> arch/arm64/kernel/sys.c
           fi
-          # 2. 注入类型定义
-          sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h || true
-          # 3. 修复 patch_memory.c
+
+          # 2. 【修复报错 1】直接在 SukiSU 头文件中注入 syscall_fn_t 定义
+          # 这样 init.c 编译时就不再依赖外部 include 的顺序
+          KSU_HOOK_H=$(find drivers -name "syscall_hook.h")
+          if [ -n "$KSU_HOOK_H" ]; then
+            echo "正在修补 $KSU_HOOK_H"
+            sed -i '2i struct pt_regs;' "$KSU_HOOK_H"
+            sed -i '3i typedef long (*syscall_fn_t)(const struct pt_regs *);' "$KSU_HOOK_H"
+          fi
+
+          # 3. 【修复报错 2】移除 4.9 内核不支持的 MODULE_IMPORT_NS 宏
+          # 该宏多见于 init.c 和内核接口调用处，直接删除整行
+          find drivers/kernelsu -name "*.c" -exec sed -i 's/MODULE_IMPORT_NS.*//g' {} +
+
+          # 4. 【常规修补】修复 4.9 内存分页 (p4d) 冲突
           PATCH_MEM=$(find drivers -name "patch_memory.c")
           if [ -n "$PATCH_MEM" ]; then
             sed -i 's/p4d_t \*p4d;//g' "$PATCH_MEM"
@@ -71,7 +84,8 @@ jobs:
             sed -i 's/pud = pud_offset(p4d, addr);/pud = pud_offset(pgd, addr);/g' "$PATCH_MEM"
             sed -i 's/__flush_icache_range/flush_icache_range/g' "$PATCH_MEM"
           fi
-          # 4. 禁用不兼容模块
+
+          # 5. 【常规修补】禁用导致开机死机的 pkg_observer
           KSU_MAKEFILES=$(find drivers -name "Makefile" | xargs grep -l "pkg_observer.o" || true)
           if [ -n "$KSU_MAKEFILES" ]; then
             for f in $KSU_MAKEFILES; do
@@ -84,6 +98,7 @@ jobs:
         run: |
           cd android-kernel
           
+          # ccache 包装
           mkdir -p bin
           ln -sf /usr/bin/ccache bin/clang
           ln -sf /usr/bin/ccache bin/gcc
@@ -101,24 +116,19 @@ jobs:
           
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
           
-          # 1. 先生成原始配置
+          # 配置流程
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
           
-          # 2. 【核心修改】在所有合并完成后，强行追加配置，并使用 sed 确保没有重复冲突
+          # 注入 KSU 配置并强刷
           sed -i '/CONFIG_KSU/d' out/.config
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_KSU_SUCOMPAT=y" >> out/.config
-          echo "CONFIG_KSU_DEBUG=n" >> out/.config
           
-          # 3. 强制刷新，如果 grep 没找到也不要报错 (加 || true)
           make $MAKE_ARGS olddefconfig
-          echo "--- KSU CONFIG CHECK ---"
-          grep "CONFIG_KSU" out/.config || true
           
-          # 4. 再次强制确认（有些内核 Makefile 会在编译开始时重置配置）
-          # 我们直接把参数带入 make 指令
-          make -j$(nproc --all) $MAKE_ARGS CONFIG_KSU=y CONFIG_KSU_SUCOMPAT=y Image.gz-dtb
+          # 正式全量编译
+          make -j$(nproc --all) $MAKE_ARGS Image.gz-dtb
           
           ccache -s
 
@@ -126,13 +136,13 @@ jobs:
         run: |
           cd android-kernel/out/arch/arm64/boot/
           if [ -f Image.gz-dtb ]; then
-            zip -j kernel-nx616j-sukisu.zip Image.gz-dtb
+            zip -j kernel-nx616j-sukisu-fixed.zip Image.gz-dtb
           elif [ -f Image.gz ]; then
-            zip -j kernel-nx616j-sukisu.zip Image.gz
+            zip -j kernel-nx616j-sukisu-fixed.zip Image.gz
           fi
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-NX616J-Force
+          name: SukiSU-Ultra-NX616J-Success
           path: android-kernel/out/arch/arm64/boot/*.zip
