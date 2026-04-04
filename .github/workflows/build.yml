@@ -1,54 +1,88 @@
-name: Build Kernel SDM845 (Clang r536225 - Pure LLVM Mode)
-
+name: Build Kernel r536225 with ReSukiSU
 on:
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Build Essentials
+      - name: 安装编译依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl \
-            zlib1g-dev libssl-dev bc device-tree-compiler python3 libncurses5-dev
+            zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev squashfs-tools liblz4-tool make \
+            libssl-dev bc libc6-dev-i386 libx11-dev libgl1-mesa-dev xsltproc unzip \
+            device-tree-compiler python3 libncurses-dev
 
-      - name: Preparation and Compiling
+      - name: 准备工作空间
+        run: mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+      - name: 下载 Clang r536225
         run: |
-          mkdir -p workspace && cd workspace
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir clang-aosp
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz
+          tar -C clang-aosp/ -zxf clang-r536225.tar.gz
 
-          # 1. 仅下载 Clang r536225 (不再依赖 GCC 辅助汇编)
-          mkdir -p clang-aosp
-          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz" | tar -C clang-aosp -zxf -
+      - name: 下载 GCC 64 & 32 (4.9)
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir gcc64
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
+          tar -C gcc64 -zxf gcc64.tar.gz
+          mkdir gcc32
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
+          tar -C gcc32 -zxf gcc32.tar.gz
 
-          # 2. 克隆内核源码
-          git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 kernel --depth 1
-          cd kernel
+      - name: 同步内核源码 (Lineage-22.2)
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          git clone https://github.com/LineageOS/android_kernel_nubia_sdm845 -b lineage-22.2 android-kernel --depth 1
 
-          # 3. 混合 Defconfig
-          cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
-              arch/arm64/configs/vendor/nubia/nx616j.config \
-              > arch/arm64/configs/lineage_nx616j_defconfig
+      - name: 集成 ReSukiSU
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+          # 下载并运行 ReSukiSU 安装脚本
+          curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
 
-          # 4. 执行编译
-          export PATH="$GITHUB_WORKSPACE/workspace/clang-aosp/bin:$PATH"
+      - name: 编译内核
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           
-          # 核心变动：移除 LLVM_IAS=0，移除所有干扰参数
-          # LLVM=1 会默认开启 LLVM 所有的替代工具（clang, ld.lld, llvm-objcopy 等）
-          MAKE_PARAMS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
-                       LD=ld.lld LLVM=1"
+          # 设置路径与环境
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+          export KBUILD_BUILD_HOST=GitHub-Action
+          export KBUILD_BUILD_USER=${{ github.actor }}
 
-          # 步骤 A: 生成配置
-          make -j$(nproc) $MAKE_PARAMS lineage_nx616j_defconfig
-          
-          # 步骤 B: 开始正式编译
-          make -j$(nproc) $MAKE_PARAMS
+          GCC64_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
+          GCC32_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-      - name: Upload Logs (If failed)
-        if: failure()
+          # 编译参数
+          MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH CROSS_COMPILE_ARM32=$GCC32_PATH LD=ld.lld LLVM=1 LLVM_IAS=1"
+
+          # 1. 生成配置并合并 nx616j 片段
+          make $MAKE_ARGS vendor/nubia/sdm845_defconfig
+          ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
+
+          # 2. 执行正式编译
+          make -j$(nproc --all) $MAKE_ARGS
+
+      - name: 打包产物
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/
+          if [ -f Image.gz-dtb ]; then
+            zip -j kernel-nx616j-resukisu.zip Image.gz-dtb
+          elif [ -f Image.gz ]; then
+            zip -j kernel-nx616j-resukisu.zip Image.gz
+          elif [ -f Image ]; then
+            zip -j kernel-nx616j-resukisu.zip Image
+          fi
+
+      - name: 上传内核
         uses: actions/upload-artifact@v4
         with:
-          name: Build-Failure-Logs
-          path: workspace/kernel/out/
+          name: Kernel-NX616J-ReSukiSU
+          path: kernel_workspace/android-kernel/out/arch/arm64/boot/*.zip
