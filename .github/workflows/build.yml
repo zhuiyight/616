@@ -1,4 +1,4 @@
-name: Build Kernel SDM845 with SukiSU-Ultra (4.9-Optimized)
+name: Build Kernel SDM845 with SukiSU-Ultra (Ultimate-4.9-Fix)
 on:
   workflow_dispatch:
 
@@ -36,23 +36,25 @@ jobs:
           # 使用 SukiSU-Ultra 官方集成脚本
           curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s main
 
-      - name: 执行 Non-GKI 必要修补
+      - name: 执行 Non-GKI 必要修补 (自动探测路径版)
         run: |
           cd android-kernel
           
-          # 1. 导出 sys_call_table (Non-GKI 必须)
+          # 1. 导出 sys_call_table (内核底层)
           if ! grep -q "EXPORT_SYMBOL(sys_call_table)" arch/arm64/kernel/sys.c; then
             echo '#include <linux/syscalls.h>' >> arch/arm64/kernel/sys.c
             echo 'EXPORT_SYMBOL(sys_call_table);' >> arch/arm64/kernel/sys.c
           fi
 
-          # 2. 定义缺失的 syscall_fn_t (4.9 内核标准适配)
-          sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h
+          # 2. 注入 syscall_fn_t 类型定义 (防止编译中断)
+          if ! grep -q "typedef.*syscall_fn_t" include/linux/syscalls.h; then
+            sed -i '/asmlinkage long sys_ni_syscall(void);/a typedef long (*syscall_fn_t)(const struct pt_regs *);' include/linux/syscalls.h
+          fi
 
-          # 3. 针对 4.9 内核的分页机制修补 (这是 SukiSU-Ultra 还没完全自动化的部分)
-          # 修复 p4d 报错，直接连接 pgd 到 pud
-          PATCH_MEM="drivers/kernelsu/hook/arm64/patch_memory.c"
-          if [ -f "$PATCH_MEM" ]; then
+          # 3. 【自动定位】修复 patch_memory.c (解决 p4d/五级分页报错)
+          PATCH_MEM=$(find drivers -name "patch_memory.c")
+          if [ -n "$PATCH_MEM" ]; then
+            echo "发现内存补丁文件: $PATCH_MEM"
             sed -i 's/p4d_t \*p4d;//g' "$PATCH_MEM"
             sed -i 's/p4d = p4d_offset(pgd, addr);//g' "$PATCH_MEM"
             sed -i 's/if (p4d_none(\*p4d) || p4d_bad(\*p4d))/if (0)/g' "$PATCH_MEM"
@@ -60,33 +62,58 @@ jobs:
             sed -i 's/__flush_icache_range/flush_icache_range/g' "$PATCH_MEM"
           fi
 
-          # 4. 禁用导致报错的包观察者模块 (4.9 fsnotify 不兼容)
-          sed -i 's/obj-y += pkg_observer.o/# obj-y += pkg_observer.o/g' drivers/kernelsu/manager/Makefile
+          # 4. 【自动定位】禁用 pkg_observer (解决 4.9 内核 fsnotify 冲突)
+          KSU_MAKEFILES=$(find drivers -name "Makefile" | xargs grep -l "pkg_observer.o" || true)
+          if [ -n "$KSU_MAKEFILES" ]; then
+            for f in $KSU_MAKEFILES; do
+              echo "在 $f 中注销 pkg_observer 模块"
+              sed -i 's/obj-y += pkg_observer.o/# obj-y += pkg_observer.o/g' "$f"
+              sed -i 's/ksu-y += pkg_observer.o/# ksu-y += pkg_observer.o/g' "$f"
+            done
+          fi
 
-      - name: 编译内核
+          # 5. 【自动定位】适配 4.9 头文件 (解决 tp_marker.c 缺失错误)
+          TP_MARKER=$(find drivers -name "tp_marker.c")
+          if [ -n "$TP_MARKER" ]; then
+            echo "重定向头文件路径: $TP_MARKER"
+            sed -i 's/#include <linux\/sched\/signal.h>/#include <linux\/sched.h>/g' "$TP_MARKER"
+            sed -i 's/#include <linux\/sched\/task.h>/#include <linux\/sched.h>/g' "$TP_MARKER"
+          fi
+
+      - name: 编译内核 (SDM845/4.9/Non-GKI)
         run: |
           cd android-kernel
           export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
           GCC64=$GITHUB_WORKSPACE/gcc64/bin/aarch64-linux-android-
           GCC32=$GITHUB_WORKSPACE/gcc32/bin/arm-linux-androideabi-
           
+          # 核心编译参数 (加上 KCFLAGS=-Wno-error 确保老内核警告不中断进程)
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
           
+          # 1. 生成基础配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
-          ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
+          # 2. 合并设备特定配置 (NX616J)
+          ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
           
-          # 开启 SukiSU 必要的内核配置 (Non-GKI 模式)
-          echo "CONFIG_KSU=y" >> out/.config
-          echo "CONFIG_KSU_SUCOMPAT=y" >> out/.config
+          # 3. 强制开启 SukiSU-Ultra 核心配置
+          ./scripts/config --file out/.config -e KSU
+          ./scripts/config --file out/.config -e KSU_SUCOMPAT
+          ./scripts/config --file out/.config -d KSU_PACKAGE_OBSERVER
           
+          # 4. 正式开始并行编译
           make -j$(nproc --all) $MAKE_ARGS
 
-      - name: 打包与上传
+      - name: 打包镜像产物
         run: |
           cd android-kernel/out/arch/arm64/boot/
-          zip -j kernel-nx616j-sukisu.zip Image.gz-dtb || zip -j kernel-nx616j-sukisu.zip Image.gz
-          
-      - uses: actions/upload-artifact@v4
+          if [ -f Image.gz-dtb ]; then
+            zip -j kernel-nx616j-sukisu-ultra.zip Image.gz-dtb
+          elif [ -f Image.gz ]; then
+            zip -j kernel-nx616j-sukisu-ultra.zip Image.gz
+          fi
+
+      - name: 上传内核至 GitHub Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-Kernel
+          name: SukiSU-Ultra-NX616J-Success
           path: android-kernel/out/arch/arm64/boot/*.zip
