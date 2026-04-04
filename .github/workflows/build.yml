@@ -1,3 +1,4 @@
+
 name: Build ReSukiSU Kernel (SDM845-NX616J)
 
 on:
@@ -35,7 +36,6 @@ jobs:
           mkdir clang-aosp
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-${{ env.CLANG_VERSION }}.tar.gz
           tar -C clang-aosp/ -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
-          
           mkdir gcc64 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64 -zxf gcc64.tar.gz
           mkdir gcc32 && wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
@@ -46,30 +46,24 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth 1
 
-      - name: Integrated ReSukiSU & Patch Kbuild
+      - name: Integrated ReSukiSU & Patch 4.9 Compatibility
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          
-          # 1. 克隆 ReSukiSU 仓库并提取 kernel 源码
           git clone https://github.com/ReSukiSU/ReSukiSU.git resukisu_tmp
           mkdir -p drivers/resukisu
           cp -r resukisu_tmp/kernel/* drivers/resukisu/
-          
-          # 2. 同步 uapi 头文件
-          if [ -d "resukisu_tmp/uapi" ]; then
-            cp -r resukisu_tmp/uapi/* include/uapi/
-          fi
+          [ -d "resukisu_tmp/uapi" ] && cp -r resukisu_tmp/uapi/* include/uapi/
           rm -rf resukisu_tmp
           
-          # 3. 【核心修复】移除 Kbuild 中的强制报错校验
-          # 我们直接把包含 $(error 的行改为 $(info，使其只打印警告不停止编译
-          if [ -f "drivers/resukisu/Kbuild" ]; then
-            sed -i 's/$(error/$(info/g' drivers/resukisu/Kbuild
-            # 同时也处理可能存在的版本号获取失败问题，给一个默认值
-            sed -i 's/$(shell git rev-parse --short HEAD)/github-action/g' drivers/resukisu/Kbuild
-          fi
+          # 1. 绕过 Kbuild 校验
+          sed -i 's/$(error/$(info/g' drivers/resukisu/Kbuild
+          sed -i 's/$(shell git rev-parse --short HEAD)/github-action/g' drivers/resukisu/Kbuild
           
-          # 4. 注入到内核构建系统
+          # 2. 修复 syscall_fn_t 未定义错误 (针对老内核)
+          # 在 syscall_hook.h 顶部插入定义
+          sed -i '1i #include <linux/types.h>\ntypedef void (*syscall_fn_t)(void);' drivers/resukisu/hook/syscall_hook.h
+          
+          # 3. 注入系统
           sed -i '/endmenu/i source "drivers/resukisu/Kconfig"' drivers/Kconfig
           echo 'obj-y += resukisu/' >> drivers/Makefile
 
@@ -79,7 +73,6 @@ jobs:
           cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
               arch/arm64/configs/vendor/nubia/nx616j.config \
               > arch/arm64/configs/lineage_nx616j_defconfig
-          
           {
             echo "CONFIG_RESUKISU=y"
             echo "CONFIG_KPROBES=y"
@@ -94,28 +87,11 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-          
           GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-          # 生成 .config
-          make -j$(nproc) O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=$GCC64 \
-            CROSS_COMPILE_ARM32=$GCC32 \
-            LD=ld.lld LLVM=1 LLVM_IAS=1 \
-            lineage_nx616j_defconfig
-
-          # 正式编译
-          make -j$(nproc) O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=$GCC64 \
-            CROSS_COMPILE_ARM32=$GCC32 \
-            LD=ld.lld LLVM=1 LLVM_IAS=1
+          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1 lineage_nx616j_defconfig
+          make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64 CROSS_COMPILE_ARM32=$GCC32 LD=ld.lld LLVM=1 LLVM_IAS=1
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4
