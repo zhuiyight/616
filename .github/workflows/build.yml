@@ -1,4 +1,4 @@
-name: Build Kernel r536225
+name: Build Kernel r536225 with ReSukiSU
 on:
   workflow_dispatch:
 
@@ -47,16 +47,23 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
 
-      - name: 修复 ReSukiSU 兼容性检查
+      - name: 修复 ReSukiSU 兼容性
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 必须保留此项，否则 ReSukiSU 会在 Non-GKI 环境下强制停止 make
-          sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
+          # 1. 将 Kbuild 中的 Non-GKI 错误降级为警告
+          if [ -f drivers/kernelsu/Kbuild ]; then
+            sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
+          fi
+          # 2. 修复 4.9 内核缺失 syscall_fn_t 定义的问题
+          if [ -f drivers/kernelsu/hook/syscall_hook.h ]; then
+            sed -i '1i#ifndef syscall_fn_t\ntypedef void *syscall_fn_t;\n#endif' drivers/kernelsu/hook/syscall_hook.h
+          fi
 
       - name: 编译内核
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           
+          # 设置环境变量
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=${{ github.actor }}
@@ -64,13 +71,16 @@ jobs:
           GCC64_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
+          # 编译参数
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH CROSS_COMPILE_ARM32=$GCC32_PATH LD=ld.lld LLVM=1 LLVM_IAS=1"
 
-          # 1. 生成原始配置
+          # 1. 生成配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
+          
+          # 2. 合并设备特有配置
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
 
-          # 2. 执行正式编译 (不进行任何配置注入或源码修改)
+          # 3. 正式编译 (不包含 NR_CPUS 补丁)
           make -j$(nproc --all) $MAKE_ARGS
 
       - name: 打包产物
@@ -80,6 +90,8 @@ jobs:
             zip -j kernel-nx616j-resukisu.zip Image.gz-dtb
           elif [ -f Image.gz ]; then
             zip -j kernel-nx616j-resukisu.zip Image.gz
+          elif [ -f Image ]; then
+            zip -j kernel-nx616j-resukisu.zip Image
           fi
 
       - name: 上传内核
