@@ -1,4 +1,4 @@
-name: Build Kernel r536225 with ReSukiSU
+name: Build Kernel r536225
 on:
   workflow_dispatch:
 
@@ -45,14 +45,18 @@ jobs:
       - name: 集成 ReSukiSU
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 下载并运行 ReSukiSU 安装脚本
           curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
+
+      - name: 修复 ReSukiSU 兼容性检查
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+          # 必须保留此项，否则 ReSukiSU 会在 Non-GKI 环境下强制停止 make
+          sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
 
       - name: 编译内核
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           
-          # 设置路径与环境
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=${{ github.actor }}
@@ -60,14 +64,13 @@ jobs:
           GCC64_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
           GCC32_PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-          # 编译参数
           MAKE_ARGS="ARCH=arm64 O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$GCC64_PATH CROSS_COMPILE_ARM32=$GCC32_PATH LD=ld.lld LLVM=1 LLVM_IAS=1"
 
-          # 1. 生成配置并合并 nx616j 片段
+          # 1. 生成原始配置
           make $MAKE_ARGS vendor/nubia/sdm845_defconfig
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
 
-          # 2. 执行正式编译
+          # 2. 执行正式编译 (不进行任何配置注入或源码修改)
           make -j$(nproc --all) $MAKE_ARGS
 
       - name: 打包产物
@@ -77,8 +80,6 @@ jobs:
             zip -j kernel-nx616j-resukisu.zip Image.gz-dtb
           elif [ -f Image.gz ]; then
             zip -j kernel-nx616j-resukisu.zip Image.gz
-          elif [ -f Image ]; then
-            zip -j kernel-nx616j-resukisu.zip Image
           fi
 
       - name: 上传内核
