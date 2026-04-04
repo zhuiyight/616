@@ -1,4 +1,4 @@
-name: Build Kernel with ReSukiSU & SuSFS for nx616j
+name: Build ReSukiSU Kernel (SDM845-NX616J)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,6 @@ jobs:
   build:
     name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +17,7 @@ jobs:
           echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
           echo "CLANG_VERSION=r487747c" >> $GITHUB_ENV
           echo "DEVICE=nx616j" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date '+%Y%m%d%H%M')" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
@@ -37,14 +36,14 @@ jobs:
           mkdir clang-aosp
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2023/clang-${{ env.CLANG_VERSION }}.tar.gz
           tar -C clang-aosp/ -zxf clang-${{ env.CLANG_VERSION }}.tar.gz
-          chmod +x clang-aosp/bin/clang
 
-      - name: Download GCC 64 & 32 (for compat vDSO)
+      - name: Download GCC 64 & 32
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
           mkdir gcc64
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
           tar -C gcc64 -zxf gcc64.tar.gz
+
           mkdir gcc32
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
           tar -C gcc32 -zxf gcc32.tar.gz
@@ -54,82 +53,69 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           git clone ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth 1
 
-      - name: Merge defconfig
+      - name: Integrated ReSukiSU
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          BASE_DEFCONFIG=arch/arm64/configs/vendor/nubia/sdm845_defconfig
-          DEVICE_DEFCONFIG=arch/arm64/configs/vendor/nubia/nx616j.config
-          TARGET_DEFCONFIG=arch/arm64/configs/lineage_nx616j_defconfig
-          if [ -f "$DEVICE_DEFCONFIG" ]; then
-            scripts/kconfig/merge_config.sh -m -O . $BASE_DEFCONFIG $DEVICE_DEFCONFIG
-            mv .config $TARGET_DEFCONFIG
-          else
-            echo "Device defconfig not found, using base defconfig only"
-            cp $BASE_DEFCONFIG $TARGET_DEFCONFIG
-          fi
+          # 克隆 ReSukiSU 驱动到驱动目录
+          git clone https://github.com/ReSukiSU/ReSukiSU.git drivers/resukisu
+          
+          # 修改内核构建脚本以包含新驱动
+          # 在 drivers/Kconfig 末尾添加 source
+          sed -i '$a source "drivers/resukisu/Kconfig"' drivers/Kconfig
+          # 在 drivers/Makefile 末尾添加 obj-y
+          echo 'obj-y += resukisu/' >> drivers/Makefile
 
-      - name: Clone ReSukiSU
-        run: |
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git $GITHUB_WORKSPACE/kernel_workspace/ReSukiSU
-
-      - name: Integrate ReSukiSU
-        run: |
-          cp $GITHUB_WORKSPACE/kernel_workspace/ReSukiSU/kernel/setup.sh $GITHUB_WORKSPACE/kernel_workspace/android-kernel/
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          bash ./setup.sh
-
-      - name: Clone NonGKI Patch Tool (includes SuSFS backports)
-        run: |
-          git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git $GITHUB_WORKSPACE/kernel_workspace/nongki_tool
-
-      - name: Run NonGKI backport patches (KSU + SuSFS)
-        run: |
-          cp -a $GITHUB_WORKSPACE/kernel_workspace/nongki_tool/Patches $GITHUB_WORKSPACE/kernel_workspace/android-kernel/Patches
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          bash ./Patches/backport_patches.sh
-
-      - name: Setup kernel config and enable KSU/SuSFS
+      - name: Merge defconfig & Patch ReSukiSU Configs
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-          export CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            lineage_nx616j_defconfig
-          ./scripts/config --file out/.config \
-            --enable CONFIG_KSU \
-            --enable CONFIG_KSU_SUSFS \
-            --enable CONFIG_SUSFS
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            olddefconfig
-          grep -E "CONFIG_KSU=y|CONFIG_SUSFS=y" out/.config || (echo "KSU/SuSFS not enabled" && exit 1)
+          # 合并原始配置
+          cat arch/arm64/configs/vendor/nubia/sdm845_defconfig \
+              arch/arm64/configs/vendor/nubia/nx616j.config \
+              > arch/arm64/configs/lineage_nx616j_defconfig
+          
+          # 注入 ReSukiSU 必需的内核参数
+          {
+            echo "CONFIG_RESUKISU=y"
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_HAVE_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
+            echo "CONFIG_MODULE_SIG=n"
+            echo "CONFIG_STRICT_MODULE_RWX=n"
+          } >> arch/arm64/configs/lineage_nx616j_defconfig
 
       - name: Build kernel
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-          export CROSS_COMPILE=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
-          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
+          export KBUILD_BUILD_HOST=GitHub-Action
+          export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
 
-      - name: Prepare AnyKernel3
-        run: |
-          cd $GITHUB_WORKSPACE
-          git clone https://github.com/osm0sis/AnyKernel3 -b master
-          cp kernel_workspace/android-kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cd AnyKernel3
-          sed -i 's/device.name1=/device.name1=nx616j/g' anykernel.sh
-          zip -r9 kernel-nx616j-${{ env.BUILD_TIME }}.zip * -x .git README.md .gitignore
-          mv kernel-nx616j-${{ env.BUILD_TIME }}.zip $GITHUB_WORKSPACE/
+          GCC64=$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin/aarch64-linux-android-
+          GCC32=$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin/arm-linux-androideabi-
 
-      - name: Upload kernel zip
+          # 生成最终 .config
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=$GCC64 \
+            CROSS_COMPILE_ARM32=$GCC32 \
+            LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            lineage_nx616j_defconfig
+
+          # 正式执行编译
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=$GCC64 \
+            CROSS_COMPILE_ARM32=$GCC32 \
+            LD=ld.lld LLVM=1 LLVM_IAS=1
+
+      - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-nx616j-lineage22.2-${{ env.BUILD_TIME }}
-          path: kernel-nx616j-${{ env.BUILD_TIME }}.zip
+          name: ReSukiSU-Kernel-nx616j-${{ env.BUILD_TIME }}
+          path: |
+            kernel_workspace/android-kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img
