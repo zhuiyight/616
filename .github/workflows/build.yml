@@ -20,22 +20,24 @@ jobs:
       - name: 准备工作空间
         run: mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-      - name: 下载 Clang r536225
+      - name: 下载工具链 (Clang & GCC)
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
-          mkdir clang-aosp
+          
+          # 下载并解压 Clang r536225
+          mkdir -p clang-aosp
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz
           tar -C clang-aosp/ -zxf clang-r536225.tar.gz
-
-      - name: 下载 GCC 64 & 32 (4.9)
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          mkdir gcc64
+          
+          # 下载并解压 GCC 64
+          mkdir -p gcc64
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc64.tar.gz
-          tar -C gcc64 -zxf gcc64.tar.gz
-          mkdir gcc32
+          tar -C gcc64/ -zxf gcc64.tar.gz
+          
+          # 下载并解压 GCC 32
+          mkdir -p gcc32
           wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz -O gcc32.tar.gz
-          tar -C gcc32 -zxf gcc32.tar.gz
+          tar -C gcc32/ -zxf gcc32.tar.gz
 
       - name: 同步内核源码 (Lineage-22.2)
         run: |
@@ -50,20 +52,24 @@ jobs:
       - name: 修复 ReSukiSU 兼容性
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          # 1. 将 Kbuild 中的 Non-GKI 错误降级为警告
+          
+          # 1. 绕过 Non-GKI 检查（将 error 改为 warning）
           if [ -f drivers/kernelsu/Kbuild ]; then
             sed -i 's/\$(error TP hooks/\$(warning TP hooks/g' drivers/kernelsu/Kbuild
           fi
-          # 2. 修复 4.9 内核缺失 syscall_fn_t 定义的问题
+          
+          # 2. 注入正确的函数指针定义，修复 sucompat.c 调用报错
           if [ -f drivers/kernelsu/hook/syscall_hook.h ]; then
-            sed -i '1i#ifndef syscall_fn_t\ntypedef void *syscall_fn_t;\n#endif' drivers/kernelsu/hook/syscall_hook.h
+            # 在文件头插入必要的头文件和类型定义
+            # 这里定义 long (*)(struct pt_regs *) 才能被内核代码当作函数调用
+            sed -i '1i#include <linux/ptrace.h>\n#ifndef syscall_fn_t\ntypedef long (*syscall_fn_t)(struct pt_regs *);\n#endif' drivers/kernelsu/hook/syscall_hook.h
           fi
 
       - name: 编译内核
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           
-          # 设置环境变量
+          # 导出路径
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=GitHub-Action
           export KBUILD_BUILD_USER=${{ github.actor }}
@@ -80,7 +86,7 @@ jobs:
           # 2. 合并设备特有配置
           ARCH=arm64 ./scripts/kconfig/merge_config.sh -O out/ out/.config arch/arm64/configs/vendor/nubia/nx616j.config
 
-          # 3. 正式编译 (不包含 NR_CPUS 补丁)
+          # 3. 执行正式编译
           make -j$(nproc --all) $MAKE_ARGS
 
       - name: 打包产物
